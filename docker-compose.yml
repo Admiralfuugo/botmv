@@ -4,7 +4,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: votes
-      POSTGRES_PASSWORD: votes
+      # parol .env dagi POSTGRES_PASSWORD dan olinadi (yo'q bo'lsa — lokal uchun "votes")
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-votes}
       POSTGRES_DB: votes
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -12,19 +13,25 @@ services:
       test: ["CMD-SHELL", "pg_isready -U votes"]
       interval: 5s
       retries: 10
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   bot:
     build: .
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://votes:votes@db:5432/votes
+      DATABASE_URL: postgresql://votes:${POSTGRES_PASSWORD:-votes}@db:5432/votes
     depends_on:
       db:
         condition: service_healthy
     ports:
       # faqat shu kompyuterdan ochiladi
       - "127.0.0.1:8080:8080"
+    logging: *logging
 
 volumes:
   pgdata:

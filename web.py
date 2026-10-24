@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import html
 import io
+import ipaddress
 import logging
 import math
 import re
@@ -669,11 +670,25 @@ async def login_page(request: web.Request):
     return _login_page(_safe_next(request.query.get("next", "/")))
 
 
+def _client_ip(request: web.Request) -> str:
+    # proxy (nginx/Coolify) ortida haqiqiy IP sarlavhada keladi; sarlavhaga faqat lokal proxy'dan ishonamiz
+    remote = request.remote or "?"
+    try:
+        trusted = ipaddress.ip_address(remote).is_private
+    except ValueError:
+        trusted = False
+    if trusted:
+        fwd = request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For", "").split(",")[-1]
+        if fwd.strip():
+            return fwd.strip()
+    return remote
+
+
 async def login_post(request: web.Request):
     data = await request.post()
     next_ = _safe_next(data.get("next", "/"))
     user = (data.get("username") or "")[:64]
-    ip = request.remote or "?"
+    ip = _client_ip(request)
     now = time.time()
     fails = [t for t in _fails.get(ip, []) if now - t < FAIL_WINDOW]
     if len(fails) >= MAX_FAILS:

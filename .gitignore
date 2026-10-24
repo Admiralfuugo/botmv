@@ -1,0 +1,15 @@
+# sirlar (token, parollar) — hech qachon GitHub'ga yuklanmaydi
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# loglar va baza nusxalari
+*.log
+*.sql
+*.sql.gz
+backups/
