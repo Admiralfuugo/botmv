@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: votes
+      POSTGRES_PASSWORD: votes
+      POSTGRES_DB: votes
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U votes"]
+      interval: 5s
+      retries: 10
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://votes:votes@db:5432/votes
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # faqat shu kompyuterdan ochiladi
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  pgdata:
