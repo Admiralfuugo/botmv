@@ -28,9 +28,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      # faqat shu kompyuterdan ochiladi
-      - "127.0.0.1:8080:8080"
+    # admin panel tashqariga port orqali emas, Coolify proxy'si (domen) orqali ochiladi
+    expose:
+      - "8080"
     logging: *logging
 
 volumes:
