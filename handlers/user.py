@@ -10,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
 from services import channels
-from services.results import render
+from services.results import notify_change, render
 from services.subscription import forget, missing_channels
 
 router = Router()
@@ -183,6 +183,7 @@ async def vote(cb: CallbackQuery, bot: Bot):
     if not await db.add_vote(cb.from_user.id, poll_id, cid):
         await cb.answer("Siz allaqachon ovoz bergansiz.", show_alert=True)
         return
+    notify_change()
     name = dict(await db.candidates(poll_id)).get(cid, "")
     await cb.message.edit_text(
         f"✅ Ovozingiz qabul qilindi: <b>{html.escape(name)}</b>\nRahmat!\n\n"
@@ -206,3 +207,4 @@ async def on_leave(event: ChatMemberUpdated):
         poll = await db.active_poll()
         if poll:
             await db.remove_user_votes(uid, poll[0])
+            notify_change()

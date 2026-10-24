@@ -1,16 +1,26 @@
 import asyncio
 import html
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-from config import RESULTS_CHANNEL, UPDATE_INTERVAL
+from config import RESULTS_CHANNEL, TZ_OFFSET, UPDATE_INTERVAL
+
+TZ = timezone(timedelta(hours=TZ_OFFSET))
+# kanal postini tahrirlash oralig'i (s): Telegram bitta xabarni daqiqasiga ~20 martadan ko'p tahrirlashga yo'l qo'ymaydi
+LIVE_GAP = 4
 
 _last_text: dict[int, str] = {}
+# ovozlar o'zgarganda o'rnatiladi — updater_loop UPDATE_INTERVAL ni kutmasdan yangilaydi
+_dirty = asyncio.Event()
+
+
+def notify_change():
+    _dirty.set()
 
 
 def _bar(pct: float, width: int = 10) -> str:
@@ -29,7 +39,7 @@ async def render(poll_id: int, title: str, closed: bool = False) -> str:
         lines.append(f"{mark} {html.escape(name)}\n<code>{_bar(pct)}</code> {pct:.0f}% ({n})")
     lines.append(f"\nJami: <b>{total}</b> ovoz")
     if not closed:
-        lines.append(f"🕒 yangilandi {datetime.now():%H:%M:%S}")
+        lines.append(f"🕒 yangilandi {datetime.now(TZ):%H:%M:%S}")
     return "\n".join(lines)
 
 
@@ -78,6 +88,11 @@ async def close_and_publish_final(bot: Bot, poll):
 async def updater_loop(bot: Bot):
     while True:
         try:
+            await asyncio.wait_for(_dirty.wait(), timeout=UPDATE_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
+        _dirty.clear()
+        try:
             poll = await db.active_poll()
             if poll:
                 ends_at = poll[3]
@@ -87,4 +102,5 @@ async def updater_loop(bot: Bot):
                     await refresh(bot, poll[0], poll[1], poll[2])
         except Exception:
             logging.exception("updater")
-        await asyncio.sleep(UPDATE_INTERVAL)
+        # shu orada kelgan ovozlar keyingi bitta tahrirga birlashadi
+        await asyncio.sleep(LIVE_GAP)
