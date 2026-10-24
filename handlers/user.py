@@ -4,6 +4,7 @@ import time
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -41,7 +42,20 @@ async def subscribe_kb(social_done: bool):
     if any(c[1] != "telegram" for c in items) and not social_done:
         kb.button(text="☑️ Ijtimoiy tarmoqlarga obuna bo'ldim", callback_data="social_ok")
     kb.button(text="✅ Tekshirish", callback_data="check")
+    kb.button(text="📊 Natijalarni ko'rish", callback_data="res")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def results_open_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 Natijalarni ko'rish", callback_data="res")
+    return kb.as_markup()
+
+
+def results_refresh_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 Yangilash", callback_data="res:refresh")
     return kb.as_markup()
 
 
@@ -99,7 +113,9 @@ async def start(msg: Message):
     await db.upsert_user(msg.from_user.id, msg.from_user.username)
     poll = await db.active_poll()
     if not poll:
-        await msg.answer("Hozircha faol ovoz berish yo'q.")
+        # yakunlangan ovoz berish bo'lsa, uning natijasini ko'rish mumkin
+        kb = results_open_kb() if await db.last_poll() else None
+        await msg.answer("Hozircha faol ovoz berish yo'q.", reply_markup=kb)
         return
     social = await db.is_social_confirmed(msg.from_user.id)
     await msg.answer(
@@ -187,9 +203,46 @@ async def vote(cb: CallbackQuery, bot: Bot):
     name = dict(await db.candidates(poll_id)).get(cid, "")
     await cb.message.edit_text(
         f"✅ Ovozingiz qabul qilindi: <b>{html.escape(name)}</b>\nRahmat!\n\n"
-        + await render(poll_id, poll[1])
+        + await render(poll_id, poll[1]),
+        reply_markup=results_open_kb(),
     )
     await cb.answer()
+
+
+@router.callback_query(F.data == "res")
+async def results_show(cb: CallbackQuery):
+    if _throttled(cb.from_user.id):
+        await cb.answer()
+        return
+    poll = await db.last_poll()
+    if not poll:
+        await cb.answer("Hozircha ovoz berish yo'q.", show_alert=True)
+        return
+    # yangi xabar: ovoz berish oynasi joyida qoladi
+    await cb.message.answer(await render(poll[0], poll[1], closed=not poll[4]), reply_markup=results_refresh_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "res:refresh")
+async def results_refresh(cb: CallbackQuery):
+    if _throttled(cb.from_user.id, 2):
+        await cb.answer("Biroz kuting…")
+        return
+    poll = await db.last_poll()
+    if not poll:
+        await cb.answer("Hozircha ovoz berish yo'q.", show_alert=True)
+        return
+    closed = not poll[4]
+    try:
+        await cb.message.edit_text(
+            await render(poll[0], poll[1], closed=closed),
+            reply_markup=None if closed else results_refresh_kb(),
+        )
+        await cb.answer("Yangilandi")
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e):
+            raise
+        await cb.answer("Natijalar o'zgarmagan")
 
 
 @router.chat_member()
