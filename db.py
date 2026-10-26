@@ -61,6 +61,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS social_at TIMESTAMPTZ;
 UPDATE users SET social_at = '2000-01-01' WHERE social_confirmed AND social_at IS NULL;
 -- kanal posti matni (admin yozadi); bo'sh bo'lsa sarlavha ishlatiladi
 ALTER TABLE polls ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+-- post rasmi (JPEG); image_ver har almashtirishda oshadi — Telegram yangi URL ni qayta yuklaydi
+ALTER TABLE polls ADD COLUMN IF NOT EXISTS image BYTEA;
+ALTER TABLE polls ADD COLUMN IF NOT EXISTS image_ver INT NOT NULL DEFAULT 0;
 -- «Ulashish» orqali yuborilgan nusxalar: bot ularni ham jonli yangilaydi
 CREATE TABLE IF NOT EXISTS shared_posts (
     inline_message_id TEXT PRIMARY KEY,
@@ -257,6 +260,23 @@ async def poll_description(poll_id) -> str:
 
 async def set_description(poll_id, text):
     await pool.execute("UPDATE polls SET description=$1 WHERE id=$2", text, poll_id)
+
+
+async def image_ver(poll_id) -> int | None:
+    """Rasm bo'lsa uning versiyasi, bo'lmasa None"""
+    return await pool.fetchval(
+        "SELECT CASE WHEN image IS NULL THEN NULL ELSE image_ver END FROM polls WHERE id=$1", poll_id
+    )
+
+
+async def get_image(poll_id, ver):
+    return await pool.fetchval("SELECT image FROM polls WHERE id=$1 AND image_ver=$2", poll_id, ver)
+
+
+async def set_image(poll_id, data: bytes | None):
+    await pool.execute(
+        "UPDATE polls SET image=$1, image_ver=image_ver+1 WHERE id=$2", data, poll_id
+    )
 
 
 async def close_poll(poll_id):

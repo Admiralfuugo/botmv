@@ -17,7 +17,7 @@ from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 
 import db
-from config import POLL_DAYS, TZ_OFFSET
+from config import POLL_DAYS, PUBLIC_URL, TZ_OFFSET
 from services import auth, channels, results, subscription
 
 e = html.escape
@@ -64,7 +64,8 @@ async def guard(request: web.Request, handler):
         origin = request.headers.get("Origin") or request.headers.get("Referer", "")
         if origin and urlparse(origin).netloc != request.host:
             return web.Response(status=403, text="Origin mos emas")
-    if request.path in PUBLIC:
+    # /media/ — post rasmlari: Telegram ularni login'siz yuklab oladi
+    if request.path in PUBLIC or (request.method == "GET" and request.path.startswith("/media/")):
         return await handler(request)
     admin = await _session_admin(request)
     if admin:
@@ -372,7 +373,8 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
   document.addEventListener('focusin',function(ev){var el=ev.target.closest('[data-tip]');el?show(el):hide()});
   addEventListener('scroll',hide,{passive:true});
   var MSG={created:"So'rovnoma yaratildi",added:"Nomzod qo'shildi",deleted:"Nomzod o'chirildi",
-    published:"Post kanalga joylandi",desc:"Post matni saqlandi",closed:"So'rovnoma yakunlandi",nocand:"Avval kamida bitta nomzod qo'shing",
+    published:"Post kanalga joylandi",desc:"Post saqlandi",toolong:"Rasmli postda matn 1024 belgidan oshmasin",
+    badimg:"Rasmni o'qib bo'lmadi (JPG, PNG yoki WEBP, 10 MB gacha)",nourl:"Rasm uchun PUBLIC_URL sozlanmagan",closed:"So'rovnoma yakunlandi",nocand:"Avval kamida bitta nomzod qo'shing",
     forbidden:"Bu bo'lim faqat bosh admin uchun",
     ch_added:"Obuna qo'shildi",ch_saved:"Saqlandi",ch_deleted:"Obuna o'chirildi",
     badtg:"Telegram kanal @username yoki -100… ID ko'rinishida bo'lishi kerak",
@@ -623,11 +625,21 @@ async def poll_view(poll, *, home: bool, bot_username: str = "") -> str:
                     f'<div id=results>{d["html"]}</div>{add}</section>')
     if active:
         desc = await db.poll_description(pid)
-        results_card += (f'<section class="card section"><div class=card-h><h2>Post matni</h2>'
-                         f'<span class="muted small">kanal posti va botda chiqadi</span></div>'
-                         f'<form method=post action=/poll/description class=grid-form>'
-                         f'<label class="field full"><textarea name=description rows=6 maxlength=3500 '
-                         f'aria-label="Post matni">{e(desc)}</textarea></label>'
+        ver = await db.image_ver(pid)
+        img = ""
+        if ver is not None:
+            img = (f'<div class=full><img src="/media/{pid}-{ver}.jpg" alt="Post rasmi" '
+                   f'style="max-width:320px;width:100%;border-radius:12px;display:block"></div>'
+                   f'<label class="check full"><input type=checkbox name=remove_image>Rasmni o\'chirish</label>')
+        results_card += (f'<section class="card section"><div class=card-h><h2>Post</h2>'
+                         f'<span class="muted small">botda va ulashilgan barcha nusxalarda yangilanadi</span></div>'
+                         f'<form method=post action=/poll/description enctype=multipart/form-data class=grid-form>'
+                         f'<label class="field full">Matn <span class=muted>rasm bo\'lsa — 1024 belgigacha</span>'
+                         f'<textarea name=description rows=6 maxlength={1024 if ver is not None else 3500} '
+                         f'aria-label="Post matni">{e(desc)}</textarea></label>{img}'
+                         f'<label class="field full">{"Rasmni almashtirish" if img else "Rasm qo‘shish"} '
+                         f'<span class=muted>JPG, PNG yoki WEBP, 10 MB gacha</span>'
+                         f'<input type=file name=image accept="image/jpeg,image/png,image/webp"></label>'
                          f'<div class=full><button class="btn primary">Saqlash</button></div></form></section>')
 
     day_pts = _day_points(per_day, created_at, ends_at, active)
@@ -870,14 +882,56 @@ async def new_poll(request: web.Request):
     _back("created")
 
 
+def _to_jpeg(raw: bytes) -> bytes:
+    """Har qanday rasmni Telegram uchun JPEG ga o'tkazadi (eng uzun tomoni 1600px)."""
+    from PIL import Image, ImageOps
+
+    im = ImageOps.exif_transpose(Image.open(io.BytesIO(raw)))
+    im = im.convert("RGB")
+    im.thumbnail((1600, 1600))
+    out = io.BytesIO()
+    im.save(out, "JPEG", quality=85, optimize=True)
+    return out.getvalue()
+
+
 async def set_description(request: web.Request):
     data = await request.post()
     poll = await db.active_poll()
-    if poll:
-        await db.set_description(poll[0], (data.get("description") or "").strip()[:3500])
+    if not poll:
+        _back("desc")
+    desc = (data.get("description") or "").strip()[:3500]
+    upload = data.get("image")
+    raw = upload.file.read() if getattr(upload, "file", None) else b""
+    remove = bool(data.get("remove_image"))
+    has_image = bool(raw) or (not remove and await db.image_ver(poll[0]) is not None)
+    if has_image and len(desc) > 1024:
+        _back("toolong")
+    if raw and not PUBLIC_URL:
+        _back("nourl")
+    jpeg = None
+    if raw:
+        try:
+            jpeg = await asyncio.to_thread(_to_jpeg, raw)
+        except Exception:
+            _back("badimg")
+    await db.set_description(poll[0], desc)
+    if jpeg or remove:
+        await db.set_image(poll[0], jpeg)
+        # rasm almashdi — barcha nusxalarda rasm ham yangilanadi
+        results.media_changed(poll[0])
+    else:
         # kanal posti va ulashilgan nusxalar yangi matn bilan yangilanadi
         results.notify_change()
     _back("desc")
+
+
+async def media(request: web.Request):
+    pid, ver = int(request.match_info["pid"]), int(request.match_info["ver"])
+    data = await db.get_image(pid, ver)
+    if not data:
+        raise web.HTTPNotFound()
+    return web.Response(body=data, content_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 async def add_candidate(request: web.Request):
@@ -1275,7 +1329,8 @@ async def _load_secret(app):
 
 
 def make_app(bot) -> web.Application:
-    app = web.Application(middlewares=[guard])
+    # 12 MB — post rasmini yuklash uchun (standart 1 MB)
+    app = web.Application(middlewares=[guard], client_max_size=12 * 1024 * 1024)
     app["bot"] = bot
     app.on_response_prepare.append(_security_headers)
     app.on_startup.append(_load_secret)
@@ -1289,6 +1344,7 @@ def make_app(bot) -> web.Application:
         web.get("/users", users_page),
         web.post("/poll/new", new_poll),
         web.post("/poll/description", set_description),
+        web.get(r"/media/{pid:\d+}-{ver:\d+}.jpg", media),
         web.post("/candidate/add", add_candidate),
         web.post("/candidate/delete", delete_candidate),
         web.post("/publish", publish),

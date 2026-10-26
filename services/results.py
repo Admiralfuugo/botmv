@@ -5,10 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.types import InputMediaPhoto
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-from config import RESULTS_CHANNEL, TZ_OFFSET, UPDATE_INTERVAL
+from config import PUBLIC_URL, RESULTS_CHANNEL, TZ_OFFSET, UPDATE_INTERVAL
 
 TZ = timezone(timedelta(hours=TZ_OFFSET))
 # kanal postini tahrirlash oralig'i (s): Telegram bitta xabarni daqiqasiga ~20 martadan ko'p tahrirlashga yo'l qo'ymaydi
@@ -22,6 +23,23 @@ _dirty = asyncio.Event()
 
 def notify_change():
     _dirty.set()
+
+
+# rasmi almashtirilgan so'rovnomalar: keyingi yangilashda barcha nusxalarda rasm ham almashtiriladi
+_media_dirty: set[int] = set()
+
+
+def media_changed(poll_id: int):
+    _media_dirty.add(poll_id)
+    notify_change()
+
+
+async def post_image(poll_id: int) -> str | None:
+    """Post rasmining ommaviy URL i (Telegram uni shu manzildan yuklaydi) yoki None."""
+    if not PUBLIC_URL:
+        return None
+    ver = await db.image_ver(poll_id)
+    return None if ver is None else f"{PUBLIC_URL}/media/{poll_id}-{ver}.jpg"
 
 
 def _bar(pct: float, width: int = 10) -> str:
@@ -75,12 +93,51 @@ async def post_keyboard(bot: Bot, poll_id: int, *, closed: bool = False, in_bot:
     return _post_markup(rows, (await bot.me()).username, poll_id, closed=closed, in_bot=in_bot)
 
 
+async def send_post(bot: Bot, chat_id, poll_id: int, text: str, markup):
+    """Rasm bo'lsa — rasm + caption, bo'lmasa oddiy matn."""
+    url = await post_image(poll_id)
+    if url:
+        return await bot.send_photo(chat_id, url, caption=text, reply_markup=markup)
+    return await bot.send_message(chat_id, text, reply_markup=markup)
+
+
 async def publish(bot: Bot, poll_id: int, title: str) -> int:
     text = await post_text(poll_id, title)
-    msg = await bot.send_message(RESULTS_CHANNEL, text, reply_markup=await post_keyboard(bot, poll_id))
+    msg = await send_post(bot, RESULTS_CHANNEL, poll_id, text, await post_keyboard(bot, poll_id))
     await db.set_message_id(poll_id, msg.message_id)
     _last_sig.pop(poll_id, None)
     return msg.message_id
+
+
+async def _edit_post(bot: Bot, text: str, url: str | None, markup, media: bool, **target):
+    """Bitta nusxani yangilaydi. Xabar matnli yoki rasmli ekanini bilmaymiz — mos kelmasa boshqa usulga o'tamiz."""
+    async def as_text():
+        await bot.edit_message_text(text, reply_markup=markup, **target)
+
+    async def as_caption():
+        await bot.edit_message_caption(caption=text, reply_markup=markup, **target)
+
+    if url and media:
+        first, second = (lambda: bot.edit_message_media(
+            InputMediaPhoto(media=url, caption=text, parse_mode="HTML"), reply_markup=markup, **target)), as_text
+    elif url:
+        first, second = as_caption, as_text
+    else:
+        first, second = as_text, as_caption
+    try:
+        await first()
+    except TelegramBadRequest as e:
+        s = str(e).lower()
+        if "not modified" in s:
+            return
+        # "there is no text/caption/media in the message to edit" — xabar turi boshqa
+        if "there is no" not in s:
+            raise
+        try:
+            await second()
+        except TelegramBadRequest as e2:
+            if "not modified" not in str(e2):
+                raise
 
 
 def _gone(e: TelegramBadRequest) -> bool:
@@ -88,15 +145,15 @@ def _gone(e: TelegramBadRequest) -> bool:
     return "message_id_invalid" in s or "not found" in s or "message can't be edited" in s
 
 
-async def _edit_shared(bot: Bot, ids: list[str], text: str, markup):
+async def _edit_shared(bot: Bot, ids: list[str], text: str, url, markup, media: bool):
     """Ulashilgan nusxalarni yangilaydi: 20 tadan, soniyasiga ~20 tahrir (Telegram umumiy limiti ~30)."""
     async def one(iid):
         try:
-            await bot.edit_message_text(text, inline_message_id=iid, reply_markup=markup)
+            await _edit_post(bot, text, url, markup, media, inline_message_id=iid)
         except TelegramBadRequest as e:
             if _gone(e):
                 await db.delete_shared(iid)
-            elif "not modified" not in str(e):
+            else:
                 logging.warning("shared edit failed: %s", e)
 
     for i in range(0, len(ids), 20):
@@ -111,22 +168,24 @@ async def _edit_shared(bot: Bot, ids: list[str], text: str, markup):
 async def refresh(bot: Bot, poll_id: int, title: str, message_id: int | None, closed=False):
     text = await post_text(poll_id, title, closed)
     rows = await db.counts_by_id(poll_id)
-    # matn ham, sonlar ham o'zgarmasa — tahrirlamaymiz
-    sig = text + repr(rows)
-    if not closed and _last_sig.get(poll_id) == sig:
+    url = await post_image(poll_id)
+    media = poll_id in _media_dirty
+    # matn, rasm va sonlar o'zgarmasa — tahrirlamaymiz
+    sig = text + repr(rows) + str(url)
+    if not closed and not media and _last_sig.get(poll_id) == sig:
         return
+    _media_dirty.discard(poll_id)
     markup = _post_markup(rows, (await bot.me()).username, poll_id, closed=closed, in_bot=False)
     if message_id:
         try:
-            await bot.edit_message_text(text, chat_id=RESULTS_CHANNEL, message_id=message_id, reply_markup=markup)
+            await _edit_post(bot, text, url, markup, media, chat_id=RESULTS_CHANNEL, message_id=message_id)
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after)
             return
         except TelegramBadRequest as e:
-            if "not modified" not in str(e):
-                logging.warning("edit failed: %s", e)
+            logging.warning("edit failed: %s", e)
     _last_sig[poll_id] = sig
-    await _edit_shared(bot, await db.shared_posts(poll_id), text, markup)
+    await _edit_shared(bot, await db.shared_posts(poll_id), text, url, markup, media)
 
 
 async def close_and_publish_final(bot: Bot, poll):

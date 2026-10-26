@@ -8,13 +8,13 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery, ChatMemberUpdated, ChosenInlineResult, InlineQuery, InlineQueryResultArticle,
-    InputTextMessageContent, Message,
+    InlineQueryResultPhoto, InputTextMessageContent, Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
 from services import channels
-from services.results import notify_change, post_keyboard, post_text, render
+from services.results import notify_change, post_image, post_keyboard, post_text, render, send_post
 from services.subscription import forget, missing_channels
 
 router = Router()
@@ -154,10 +154,8 @@ async def start(msg: Message, bot: Bot, command: CommandObject):
     # admin paneldagi «Botda ochish» (/start post): tarqatish uchun ko'rsatma
     hint = ("📤 «Ulashish» tugmasini bosib, postni kanal yoki guruhga yuboring — "
             "u yerdagi sonlar ham jonli yangilanadi." if arg == "post" else "👇 Nomzodni tanlang:")
-    await msg.answer(
-        await post_text(poll[0], poll[1]) + "\n\n" + hint,
-        reply_markup=await post_keyboard(bot, poll[0], in_bot=True),
-    )
+    await send_post(bot, msg.chat.id, poll[0], await post_text(poll[0], poll[1]) + "\n\n" + hint,
+                    await post_keyboard(bot, poll[0], in_bot=True))
 
 
 @router.callback_query(F.data.startswith("pick:"))
@@ -182,10 +180,10 @@ async def repick(cb: CallbackQuery, bot: Bot):
     if not poll:
         await cb.answer("Ovoz berish yakunlangan.", show_alert=True)
         return
-    await cb.message.edit_text(
-        await post_text(poll[0], poll[1]) + "\n\n👇 Nomzodni tanlang:",
-        reply_markup=await post_keyboard(bot, poll[0], in_bot=True),
-    )
+    # rasmli postni matnli xabarga aylantirib bo'lmaydi — postni yangidan yuboramiz
+    await cb.message.delete()
+    await send_post(bot, cb.message.chat.id, poll[0], await post_text(poll[0], poll[1]) + "\n\n👇 Nomzodni tanlang:",
+                    await post_keyboard(bot, poll[0], in_bot=True))
     await cb.answer()
 
 
@@ -202,13 +200,21 @@ async def share_post(q: InlineQuery, bot: Bot):
         await q.answer([], cache_time=0, is_personal=True)
         return
     text = await post_text(poll[0], poll[1])
-    item = InlineQueryResultArticle(
-        id=f"poll{poll[0]}",
-        title=poll[1][:64],
-        description="So'rovnomani yuborish",
-        input_message_content=InputTextMessageContent(message_text=text),
-        reply_markup=await post_keyboard(bot, poll[0]),
-    )
+    markup = await post_keyboard(bot, poll[0])
+    url = await post_image(poll[0])
+    if url:
+        item = InlineQueryResultPhoto(
+            id=f"poll{poll[0]}", photo_url=url, thumbnail_url=url,
+            title=poll[1][:64], caption=text, parse_mode="HTML", reply_markup=markup,
+        )
+    else:
+        item = InlineQueryResultArticle(
+            id=f"poll{poll[0]}",
+            title=poll[1][:64],
+            description="So'rovnomani yuborish",
+            input_message_content=InputTextMessageContent(message_text=text),
+            reply_markup=markup,
+        )
     await q.answer([item], cache_time=0, is_personal=True)
 
 

@@ -25,5 +25,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://votes:votes@localhost:543
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
+# admin panelning tashqi manzili (https://admin.fuugo.uz): post rasmlarini Telegram shu yerdan oladi
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 # admin panelda vaqtlar shu UTC siljishida ko'rsatiladi (Toshkent = +5)
 TZ_OFFSET = int(os.getenv("TZ_OFFSET", "5"))
