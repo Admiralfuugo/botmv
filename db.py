@@ -254,6 +254,10 @@ async def create_poll(title, ends_at, description=""):
         )
 
 
+async def set_ends_at(poll_id, ends_at):
+    await pool.execute("UPDATE polls SET ends_at=$1 WHERE id=$2", ends_at, poll_id)
+
+
 async def poll_description(poll_id) -> str:
     return await pool.fetchval("SELECT description FROM polls WHERE id=$1", poll_id) or ""
 
@@ -318,6 +322,10 @@ async def add_candidate(poll_id, name):
     return await pool.fetchval(
         "INSERT INTO candidates(poll_id, name) VALUES($1, $2) RETURNING id", poll_id, name
     )
+
+
+async def rename_candidate(candidate_id, name):
+    await pool.execute("UPDATE candidates SET name=$1 WHERE id=$2", name, candidate_id)
 
 
 async def delete_candidate(candidate_id):

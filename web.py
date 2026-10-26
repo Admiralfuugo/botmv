@@ -374,7 +374,8 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
   addEventListener('scroll',hide,{passive:true});
   var MSG={created:"So'rovnoma yaratildi",added:"Nomzod qo'shildi",deleted:"Nomzod o'chirildi",
     published:"Post kanalga joylandi",desc:"Post saqlandi",toolong:"Rasmli postda matn 1024 belgidan oshmasin",
-    badimg:"Rasmni o'qib bo'lmadi (JPG, PNG yoki WEBP, 10 MB gacha)",nourl:"Rasm uchun PUBLIC_URL sozlanmagan",closed:"So'rovnoma yakunlandi",nocand:"Avval kamida bitta nomzod qo'shing",
+    badimg:"Rasmni o'qib bo'lmadi (JPG, PNG yoki WEBP, 10 MB gacha)",nourl:"Rasm uchun PUBLIC_URL sozlanmagan",ends:"Tugash vaqti saqlandi",
+    badtime:"Tugash vaqti hozirgidan keyin bo'lsin",renamed:"Nomzod nomi saqlandi",closed:"So'rovnoma yakunlandi",nocand:"Avval kamida bitta nomzod qo'shing",
     forbidden:"Bu bo'lim faqat bosh admin uchun",
     ch_added:"Obuna qo'shildi",ch_saved:"Saqlandi",ch_deleted:"Obuna o'chirildi",
     badtg:"Telegram kanal @username yoki -100… ID ko'rinishida bo'lishi kerak",
@@ -641,6 +642,21 @@ async def poll_view(poll, *, home: bool, bot_username: str = "") -> str:
                          f'<span class=muted>JPG, PNG yoki WEBP, 10 MB gacha</span>'
                          f'<input type=file name=image accept="image/jpeg,image/png,image/webp"></label>'
                          f'<div class=full><button class="btn primary">Saqlash</button></div></form></section>')
+        # tugash vaqti va nomzod nomlarini tahrirlash (natijalar bloki jonli yangilanadi — formalar alohida)
+        local_end = ends_at.astimezone(TZ).strftime("%Y-%m-%dT%H:%M") if ends_at else ""
+        renames = "".join(
+            f'<form method=post action=/candidate/rename class=add><input type=hidden name=id value={cid}>'
+            f'<input type=text name=name value="{e(name)}" required maxlength=64 aria-label="Nomzod nomi">'
+            f'<button class="btn outline">Saqlash</button></form>'
+            for cid, name in await db.candidates(pid)
+        ) or '<p class=muted style="margin:0">Hali nomzod yo\'q.</p>'
+        results_card += (f'<details class="card section"><summary>{icon("plus")}Vaqt va nomzodlarni tahrirlash'
+                         f'{icon("chev", "chev")}</summary><div class=stack>'
+                         f'<form method=post action=/poll/ends class=add>'
+                         f'<label class=field>Tugash vaqti <span class=muted>Toshkent vaqti</span>'
+                         f'<input type=datetime-local name=ends_at value="{local_end}" required></label>'
+                         f'<button class="btn primary">Saqlash</button></form>'
+                         f'<h3 style="margin:8px 0 0">Nomzodlar nomi</h3>{renames}</div></details>')
 
     day_pts = _day_points(per_day, created_at, ends_at, active)
     hour_pts = [(f"{h:02d}", f"{h:02d}:00–{h:02d}:59", per_hour.get(h, 0)) for h in range(24)]
@@ -932,6 +948,36 @@ async def media(request: web.Request):
         raise web.HTTPNotFound()
     return web.Response(body=data, content_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+async def set_ends(request: web.Request):
+    data = await request.post()
+    poll = await db.active_poll()
+    if not poll:
+        _back("ends")
+    try:
+        local = datetime.strptime(data.get("ends_at", ""), "%Y-%m-%dT%H:%M").replace(tzinfo=TZ)
+    except ValueError:
+        _back("badtime")
+    if local <= datetime.now(TZ):
+        _back("badtime")
+    await db.set_ends_at(poll[0], local.astimezone(timezone.utc))
+    _back("ends")
+
+
+async def rename_candidate(request: web.Request):
+    data = await request.post()
+    poll = await db.active_poll()
+    name = (data.get("name") or "").strip()[:64]
+    try:
+        cid = int(data.get("id", ""))
+    except ValueError:
+        cid = None
+    if poll and name and cid in dict(await db.candidates(poll[0])):
+        await db.rename_candidate(cid, name)
+        # post tugmalaridagi nom ham yangilanadi
+        results.notify_change()
+    _back("renamed")
 
 
 async def add_candidate(request: web.Request):
@@ -1347,6 +1393,8 @@ def make_app(bot) -> web.Application:
         web.get(r"/media/{pid:\d+}-{ver:\d+}.jpg", media),
         web.post("/candidate/add", add_candidate),
         web.post("/candidate/delete", delete_candidate),
+        web.post("/candidate/rename", rename_candidate),
+        web.post("/poll/ends", set_ends),
         web.post("/publish", publish),
         web.post("/close", close),
         web.get("/api/live", api_live),
