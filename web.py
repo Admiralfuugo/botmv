@@ -573,7 +573,7 @@ def _new_poll_form(has_active: bool) -> str:
     )
 
 
-async def poll_view(poll, *, home: bool) -> str:
+async def poll_view(poll, *, home: bool, bot_username: str = "") -> str:
     pid, title, message_id, ends_at, active, created_at = poll
     d = await _live_data(poll)
     users_total, users_new, _ = await db.users_stats(_today_start())
@@ -590,8 +590,12 @@ async def poll_view(poll, *, home: bool) -> str:
 
     actions = []
     if active:
-        actions.append(f'<form method=post action=/publish><button class="btn primary">{icon("send")}'
-                       f'{"Postni qayta joylash" if message_id else "Kanalga joylash"}</button></form>')
+        # asosiy yo'l: post botda ochiladi va «📤 Ulashish» orqali kanal/guruhlarga tarqatiladi
+        actions.append(f'<a class="btn primary" href="https://t.me/{e(bot_username)}?start=post" target=_blank '
+                       f'rel=noopener data-tip="Botda «📤 Ulashish» → kanal yoki guruhni tanlang">'
+                       f'{icon("send")}Botda ochish</a>')
+        actions.append(f'<form method=post action=/publish><button class="btn outline">'
+                       f'{"Kanalga qayta joylash" if message_id else "Kanalga to‘g‘ridan joylash"}</button></form>')
         actions.append(f'<form method=post action=/close data-confirm="So\'rovnoma yakunlansinmi? '
                        f'Kanal postida yakuniy natija chiqadi."><button class="btn danger">{icon("stop")}'
                        f'Yakunlash</button></form>')
@@ -731,14 +735,16 @@ async def dashboard(request: web.Request):
                 f'<section class=card id=new>{_new_poll_form(False)}</section>')
         return page(body, title="Boshqaruv", active="dash")
     poll = await db.get_poll(last[0])
-    return page(await poll_view(poll, home=True), title="Boshqaruv", active="dash")
+    me = await request.app["bot"].me()
+    return page(await poll_view(poll, home=True, bot_username=me.username), title="Boshqaruv", active="dash")
 
 
 async def poll_page(request: web.Request):
     poll = await db.get_poll(int(request.match_info["id"]))
     if not poll:
         raise web.HTTPNotFound()
-    return page(await poll_view(poll, home=False), title=poll[1], active="polls")
+    me = await request.app["bot"].me()
+    return page(await poll_view(poll, home=False, bot_username=me.username), title=poll[1], active="polls")
 
 
 async def polls_page(request: web.Request):

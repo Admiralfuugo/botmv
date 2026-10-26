@@ -151,8 +151,11 @@ async def start(msg: Message, bot: Bot, command: CommandObject):
             text, kb = await _ask_subscribe(msg.from_user.id, name)
             await msg.answer(text, reply_markup=kb)
             return
+    # admin paneldagi «Botda ochish» (/start post): tarqatish uchun ko'rsatma
+    hint = ("📤 «Ulashish» tugmasini bosib, postni kanal yoki guruhga yuboring — "
+            "u yerdagi sonlar ham jonli yangilanadi." if arg == "post" else "👇 Nomzodni tanlang:")
     await msg.answer(
-        await post_text(poll[0], poll[1]) + "\n\n👇 Nomzodni tanlang:",
+        await post_text(poll[0], poll[1]) + "\n\n" + hint,
         reply_markup=await post_keyboard(bot, poll[0], in_bot=True),
     )
 
