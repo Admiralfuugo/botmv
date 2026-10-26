@@ -30,7 +30,7 @@ async def main():
 
     updater = asyncio.create_task(updater_loop(bot))
     try:
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member"])
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "inline_query", "chosen_inline_result"])
     finally:
         updater.cancel()
         await runner.cleanup()

@@ -372,7 +372,7 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
   document.addEventListener('focusin',function(ev){var el=ev.target.closest('[data-tip]');el?show(el):hide()});
   addEventListener('scroll',hide,{passive:true});
   var MSG={created:"So'rovnoma yaratildi",added:"Nomzod qo'shildi",deleted:"Nomzod o'chirildi",
-    published:"Post kanalga joylandi",closed:"So'rovnoma yakunlandi",nocand:"Avval kamida bitta nomzod qo'shing",
+    published:"Post kanalga joylandi",desc:"Post matni saqlandi",closed:"So'rovnoma yakunlandi",nocand:"Avval kamida bitta nomzod qo'shing",
     forbidden:"Bu bo'lim faqat bosh admin uchun",
     ch_added:"Obuna qo'shildi",ch_saved:"Saqlandi",ch_deleted:"Obuna o'chirildi",
     badtg:"Telegram kanal @username yoki -100… ID ko'rinishida bo'lishi kerak",
@@ -565,6 +565,8 @@ def _new_poll_form(has_active: bool) -> str:
         '<label class=field>Sarlavha / savol<input type=text name=title required maxlength=200 '
         'placeholder="Masalan: Yilning eng yaxshi ..."></label>'
         f'<label class=field>Davomiyligi (kun)<input type=number name=days value={POLL_DAYS} min=1 max=90></label>'
+        '<label class="field full">Post matni <span class=muted>kanal posti va botda chiqadi; bo\'sh bo\'lsa sarlavha</span>'
+        '<textarea name=description rows=6 maxlength=3500 placeholder="Tanlov haqida, muddati, chaqiriq..."></textarea></label>'
         '<label class="field full">Nomzodlar <span class=muted>ixtiyoriy, har qatorda bittadan</span>'
         '<textarea name=candidates rows=4 placeholder="1-nomzod&#10;2-nomzod&#10;3-nomzod"></textarea></label>'
         f'{warn}<div class=full><button class="btn primary">{icon("plus")}So\'rovnoma yaratish</button></div></form>'
@@ -615,6 +617,14 @@ async def poll_view(poll, *, home: bool) -> str:
     results_card = (f'<section class=card><div class=card-h><h2>Natijalar</h2>'
                     f'<span class="muted small" id=v-updated>{d["updated"]}</span></div>'
                     f'<div id=results>{d["html"]}</div>{add}</section>')
+    if active:
+        desc = await db.poll_description(pid)
+        results_card += (f'<section class="card section"><div class=card-h><h2>Post matni</h2>'
+                         f'<span class="muted small">kanal posti va botda chiqadi</span></div>'
+                         f'<form method=post action=/poll/description class=grid-form>'
+                         f'<label class="field full"><textarea name=description rows=6 maxlength=3500 '
+                         f'aria-label="Post matni">{e(desc)}</textarea></label>'
+                         f'<div class=full><button class="btn primary">Saqlash</button></div></form></section>')
 
     day_pts = _day_points(per_day, created_at, ends_at, active)
     hour_pts = [(f"{h:02d}", f"{h:02d}:00–{h:02d}:59", per_hour.get(h, 0)) for h in range(24)]
@@ -842,7 +852,8 @@ async def new_poll(request: web.Request):
             await results.close_and_publish_final(request.app["bot"], active)
         except Exception:
             logging.exception("eski so'rovnomani yopishda xato")
-    pid = await db.create_poll(title, datetime.now(timezone.utc) + timedelta(days=days))
+    desc = (data.get("description") or "").strip()[:3500]
+    pid = await db.create_poll(title, datetime.now(timezone.utc) + timedelta(days=days), desc)
     names = []
     for line in (data.get("candidates") or "").splitlines():
         name = line.strip()[:64]
@@ -851,6 +862,16 @@ async def new_poll(request: web.Request):
     for name in names[:50]:
         await db.add_candidate(pid, name)
     _back("created")
+
+
+async def set_description(request: web.Request):
+    data = await request.post()
+    poll = await db.active_poll()
+    if poll:
+        await db.set_description(poll[0], (data.get("description") or "").strip()[:3500])
+        # kanal posti va ulashilgan nusxalar yangi matn bilan yangilanadi
+        results.notify_change()
+    _back("desc")
 
 
 async def add_candidate(request: web.Request):
@@ -1261,6 +1282,7 @@ def make_app(bot) -> web.Application:
         web.get(r"/poll/{id:\d+}", poll_page),
         web.get("/users", users_page),
         web.post("/poll/new", new_poll),
+        web.post("/poll/description", set_description),
         web.post("/candidate/add", add_candidate),
         web.post("/candidate/delete", delete_candidate),
         web.post("/publish", publish),

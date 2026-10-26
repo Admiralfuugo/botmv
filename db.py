@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS admins (
 -- «obuna bo'ldim» vaqti: undan keyin yangi havola qo'shilsa, qayta tasdiqlash so'raladi
 ALTER TABLE users ADD COLUMN IF NOT EXISTS social_at TIMESTAMPTZ;
 UPDATE users SET social_at = '2000-01-01' WHERE social_confirmed AND social_at IS NULL;
+-- kanal posti matni (admin yozadi); bo'sh bo'lsa sarlavha ishlatiladi
+ALTER TABLE polls ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+-- «Ulashish» orqali yuborilgan nusxalar: bot ularni ham jonli yangilaydi
+CREATE TABLE IF NOT EXISTS shared_posts (
+    inline_message_id TEXT PRIMARY KEY,
+    poll_id INT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -234,12 +242,21 @@ async def active_poll():
     )
 
 
-async def create_poll(title, ends_at):
+async def create_poll(title, ends_at, description=""):
     async with pool.acquire() as c, c.transaction():
         await c.execute("UPDATE polls SET is_active=FALSE WHERE is_active")
         return await c.fetchval(
-            "INSERT INTO polls(title, ends_at) VALUES($1, $2) RETURNING id", title, ends_at
+            "INSERT INTO polls(title, ends_at, description) VALUES($1, $2, $3) RETURNING id",
+            title, ends_at, description,
         )
+
+
+async def poll_description(poll_id) -> str:
+    return await pool.fetchval("SELECT description FROM polls WHERE id=$1", poll_id) or ""
+
+
+async def set_description(poll_id, text):
+    await pool.execute("UPDATE polls SET description=$1 WHERE id=$2", text, poll_id)
 
 
 async def close_poll(poll_id):
@@ -318,6 +335,37 @@ async def results(poll_id):
         "WHERE c.poll_id=$1 GROUP BY c.id ORDER BY n DESC, c.id",
         poll_id,
     )
+
+
+async def counts_by_id(poll_id):
+    """[(id, name, count), ...] qo'shilgan tartibda (post tugmalari uchun)"""
+    return await _all(
+        "SELECT c.id, c.name, COUNT(v.user_id) AS n FROM candidates c "
+        "LEFT JOIN votes v ON v.candidate_id=c.id "
+        "WHERE c.poll_id=$1 GROUP BY c.id ORDER BY c.id",
+        poll_id,
+    )
+
+
+# --- ulashilgan nusxalar ---
+async def add_shared(inline_message_id, poll_id):
+    await pool.execute(
+        "INSERT INTO shared_posts(inline_message_id, poll_id) VALUES($1, $2) ON CONFLICT DO NOTHING",
+        inline_message_id, poll_id,
+    )
+
+
+async def shared_posts(poll_id, limit=300):
+    """Eng yangi nusxalarning inline_message_id lari"""
+    rows = await pool.fetch(
+        "SELECT inline_message_id FROM shared_posts WHERE poll_id=$1 ORDER BY created_at DESC LIMIT $2",
+        poll_id, limit,
+    )
+    return [r[0] for r in rows]
+
+
+async def delete_shared(inline_message_id):
+    await pool.execute("DELETE FROM shared_posts WHERE inline_message_id=$1", inline_message_id)
 
 
 async def votes_per_day(poll_id, tz_offset):

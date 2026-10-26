@@ -5,13 +5,16 @@ import time
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import (
+    CallbackQuery, ChatMemberUpdated, ChosenInlineResult, InlineQuery, InlineQueryResultArticle,
+    InputTextMessageContent, Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
 from services import channels
-from services.results import notify_change, render
+from services.results import notify_change, post_keyboard, post_text, render
 from services.subscription import forget, missing_channels
 
 router = Router()
@@ -21,6 +24,8 @@ _captcha_answer: dict[int, int] = {}
 _captcha_ok: dict[int, float] = {}
 CAPTCHA_TTL = 3600
 _last_click: dict[int, float] = {}
+# post tugmasidan oldindan tanlangan nomzod: user_id -> candidate_id
+_picked: dict[int, int] = {}
 
 
 def _throttled(user_id: int, gap: float = 0.7) -> bool:
@@ -92,6 +97,18 @@ async def _can_vote(bot: Bot, user_id: int) -> str | None:
 
 
 async def _show_candidates(cb: CallbackQuery, poll):
+    cid = _picked.get(cb.from_user.id)
+    name = dict(await db.candidates(poll[0])).get(cid)
+    if name:
+        kb = InlineKeyboardBuilder()
+        kb.button(text=f"✅ Ovoz berish: {name}", callback_data=f"vote:{poll[0]}:{cid}")
+        kb.button(text="↩️ Boshqa nomzodni tanlash", callback_data="repick")
+        kb.adjust(1)
+        await cb.message.edit_text(
+            f"Hammasi tayyor! <b>{html.escape(name)}</b> uchun ovozingizni tasdiqlang:",
+            reply_markup=kb.as_markup(),
+        )
+        return
     await cb.message.edit_text(
         await render(poll[0], poll[1])
         + "\n\nNomzodni tanlang (faqat 1 marta ovoz berish mumkin):",
@@ -108,8 +125,15 @@ async def results_cmd(msg: Message):
     await msg.answer(await render(poll[0], poll[1], closed=not poll[4]))
 
 
+async def _ask_subscribe(user_id: int, name: str):
+    social = await db.is_social_confirmed(user_id)
+    text = (f"Siz <b>{html.escape(name)}</b> uchun ovoz bermoqchisiz.\n\n"
+            "Ovoz berish uchun quyidagi sahifalarimizga obuna bo'ling, so'ng «Tekshirish»ni bosing.")
+    return text, await subscribe_kb(social)
+
+
 @router.message(CommandStart())
-async def start(msg: Message):
+async def start(msg: Message, bot: Bot, command: CommandObject):
     await db.upsert_user(msg.from_user.id, msg.from_user.username)
     poll = await db.active_poll()
     if not poll:
@@ -117,12 +141,79 @@ async def start(msg: Message):
         kb = results_open_kb() if await db.last_poll() else None
         await msg.answer("Hozircha faol ovoz berish yo'q.", reply_markup=kb)
         return
-    social = await db.is_social_confirmed(msg.from_user.id)
+    arg = command.args or ""
+    # kanal postidagi nomzod tugmasi: /start c<id>
+    if arg.startswith("c") and arg[1:].isdigit():
+        cid = int(arg[1:])
+        name = dict(await db.candidates(poll[0])).get(cid)
+        if name:
+            _picked[msg.from_user.id] = cid
+            text, kb = await _ask_subscribe(msg.from_user.id, name)
+            await msg.answer(text, reply_markup=kb)
+            return
     await msg.answer(
-        f"🗳 <b>{html.escape(poll[1])}</b>\n\n"
-        "Ovoz berish uchun quyidagi sahifalarimizga obuna bo'ling, so'ng «Tekshirish»ni bosing.",
-        reply_markup=await subscribe_kb(social),
+        await post_text(poll[0], poll[1]) + "\n\n👇 Nomzodni tanlang:",
+        reply_markup=await post_keyboard(bot, poll[0], in_bot=True),
     )
+
+
+@router.callback_query(F.data.startswith("pick:"))
+async def pick(cb: CallbackQuery):
+    poll = await db.active_poll()
+    cid = int(cb.data.split(":")[1])
+    name = dict(await db.candidates(poll[0])).get(cid) if poll else None
+    if not name:
+        await cb.answer("Bu ovoz berish yakunlangan.", show_alert=True)
+        return
+    _picked[cb.from_user.id] = cid
+    text, kb = await _ask_subscribe(cb.from_user.id, name)
+    # post joyida qoladi — yangi xabar
+    await cb.message.answer(text, reply_markup=kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "repick")
+async def repick(cb: CallbackQuery, bot: Bot):
+    _picked.pop(cb.from_user.id, None)
+    poll = await db.active_poll()
+    if not poll:
+        await cb.answer("Ovoz berish yakunlangan.", show_alert=True)
+        return
+    await cb.message.edit_text(
+        await post_text(poll[0], poll[1]) + "\n\n👇 Nomzodni tanlang:",
+        reply_markup=await post_keyboard(bot, poll[0], in_bot=True),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def noop(cb: CallbackQuery):
+    await cb.answer("Ovoz berish yakunlangan.")
+
+
+@router.inline_query()
+async def share_post(q: InlineQuery, bot: Bot):
+    """«📤 Ulashish»: postning bot nomidan yuboriladigan nusxasi."""
+    poll = await db.active_poll()
+    if not poll:
+        await q.answer([], cache_time=0, is_personal=True)
+        return
+    text = await post_text(poll[0], poll[1])
+    item = InlineQueryResultArticle(
+        id=f"poll{poll[0]}",
+        title=poll[1][:64],
+        description="So'rovnomani yuborish",
+        input_message_content=InputTextMessageContent(message_text=text),
+        reply_markup=await post_keyboard(bot, poll[0]),
+    )
+    await q.answer([item], cache_time=0, is_personal=True)
+
+
+@router.chosen_inline_result()
+async def shared(r: ChosenInlineResult):
+    # inline_message_id faqat @BotFather'da /setinlinefeedback yoqilganda keladi
+    if r.inline_message_id and r.result_id.startswith("poll") and r.result_id[4:].isdigit():
+        await db.add_shared(r.inline_message_id, int(r.result_id[4:]))
 
 
 @router.callback_query(F.data == "social_ok")
@@ -200,6 +291,7 @@ async def vote(cb: CallbackQuery, bot: Bot):
         await cb.answer("Siz allaqachon ovoz bergansiz.", show_alert=True)
         return
     notify_change()
+    _picked.pop(cb.from_user.id, None)
     name = dict(await db.candidates(poll_id)).get(cid, "")
     await cb.message.edit_text(
         f"✅ Ovozingiz qabul qilindi: <b>{html.escape(name)}</b>\nRahmat!\n\n"
