@@ -1,9 +1,10 @@
+import asyncio
 import html
 import random
 import time
 
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatMemberStatus
+from aiogram.enums import ChatMemberStatus, ContentType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
@@ -24,6 +25,8 @@ _captcha_answer: dict[int, int] = {}
 _captcha_ok: dict[int, float] = {}
 CAPTCHA_TTL = 3600
 _last_click: dict[int, float] = {}
+_last_warn: dict[int, float] = {}
+WARN_GAP = 5
 # post tugmasidan oldindan tanlangan nomzod: user_id -> candidate_id
 _picked: dict[int, int] = {}
 
@@ -362,3 +365,30 @@ async def on_leave(event: ChatMemberUpdated):
         if poll:
             await db.remove_user_votes(uid, poll[0])
             notify_change()
+
+
+async def _delete_later(msg: Message, delay: float):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except TelegramBadRequest:
+        pass
+
+
+# oxirgi bo'lishi shart: buyruqlar va matn yuqoridagi handlerlarga tegishli
+@router.message(F.chat.type == "private", F.content_type != ContentType.TEXT)
+async def block_media(msg: Message):
+    """Fayl, rasm, video, audio, stiker va h.k. — o'chiriladi."""
+    try:
+        await msg.delete()
+    except TelegramBadRequest:
+        pass
+    now = time.monotonic()
+    if now - _last_warn.get(msg.from_user.id, 0) < WARN_GAP:
+        return
+    _last_warn[msg.from_user.id] = now
+    if len(_last_warn) > 50000:
+        _last_warn.clear()
+    warn = await msg.answer("⛔️ Botga fayl, rasm, video yoki audio yuborib bo'lmaydi. "
+                            "Faqat tugmalardan foydalaning.")
+    asyncio.create_task(_delete_later(warn, WARN_GAP))
