@@ -56,7 +56,7 @@ async def render(poll_id: int, title: str, closed: bool = False) -> str:
         pct = n / total * 100 if total else 0
         mark = medals[i] if i < 3 and n else f"{i + 1}."
         lines.append(f"{mark} {html.escape(name)}\n<code>{_bar(pct)}</code> {pct:.0f}% ({n})")
-    
+    lines.append(f"\n")
     if not closed:
         lines.append(f"🕒 yangilandi {datetime.now(TZ):%H:%M:%S}")
     return "\n".join(lines)
