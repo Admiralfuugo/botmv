@@ -142,6 +142,8 @@ ICONS = {
     "key": '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
     "inbox": '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6'
              'l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/>',
+    "gift": '<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/>'
+            '<path d="M7.5 8a2.5 2.5 0 0 1 0-5C10 3 12 8 12 8s2-5 4.5-5a2.5 2.5 0 0 1 0 5"/>',
 }
 
 
@@ -385,8 +387,16 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
     exists:"Bunday login band",baduser:"Login 3–32 belgi: lotin harflari, raqam, _ . -",
     shortpw:"Parol kamida 8 belgidan iborat bo'lsin",mismatch:"Yangi parollar bir xil emas",
     badpw:"Joriy parol noto'g'ri",lastsuper:"Kamida bitta bosh admin qolishi kerak",
-    self:"O'zingizni o'chira olmaysiz yoki rolingizni o'zgartira olmaysiz",pw_changed:"Parol o'zgartirildi"};
-  var ERR={badtg:1,badurl:1,needlink:1,notitle:1,exists:1,baduser:1,shortpw:1,mismatch:1,badpw:1,lastsuper:1,self:1,forbidden:1};
+    self:"O'zingizni o'chira olmaysiz yoki rolingizni o'zgartira olmaysiz",pw_changed:"Parol o'zgartirildi",
+    pr_created:"Konkurs yaratildi",pr_saved:"Saqlandi — kanal va botdagi postlar yangilanmoqda",
+    pr_published:"Post joylandi",pr_nowhere:"Qayerga joylashni tanlang",pr_running:"Botga yuborish davom etmoqda",
+    pr_ended:"Konkurs muddati tugatildi",pr_notended:"G'olib faqat muddat tugagach aniqlanadi",
+    pr_winner:"G'olib aniqlandi",pr_nobody:"Tanlash uchun ishtirokchi qolmadi",
+    pr_tgerr:"Kanal obunasini tekshirib bo'lmadi — bot kanalda admin ekanini tekshiring",
+    pr_sent:"Tabrik yuborildi",pr_blocked:"Yuborib bo'lmadi: foydalanuvchi botni bloklagan",
+    pr_senderr:"Xabarni yuborib bo'lmadi",pr_notext:"Xabar matni bo'sh",pr_closed:"Bu konkurs yopilgan"};
+  var ERR={badtg:1,badurl:1,needlink:1,notitle:1,exists:1,baduser:1,shortpw:1,mismatch:1,badpw:1,lastsuper:1,self:1,forbidden:1,
+    pr_nowhere:1,pr_running:1,pr_notended:1,pr_nobody:1,pr_tgerr:1,pr_blocked:1,pr_senderr:1,pr_notext:1,pr_closed:1};
   var u=new URL(location.href),m=u.searchParams.get('m');
   if(m&&MSG[m]){var t=document.getElementById('toast');t.textContent=MSG[m];t.classList.toggle('err',!!ERR[m]);
     requestAnimationFrame(function(){t.classList.add('show')});setTimeout(function(){t.classList.remove('show')},2800);
@@ -419,7 +429,7 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
 
 def _topbar(active: str) -> str:
     admin = current_admin.get()
-    links = [("/", "dash", "Boshqaruv"), ("/polls", "list", "So'rovnomalar"),
+    links = [("/", "dash", "Boshqaruv"), ("/polls", "list", "So'rovnomalar"), ("/premium", "gift", "Premium"),
              ("/users", "users", "Foydalanuvchilar"), ("/channels", "link", "Obunalar")]
     if admin and admin[3]:
         links.append(("/admins", "shield", "Adminlar"))
@@ -1413,4 +1423,6 @@ def make_app(bot) -> web.Application:
         web.get("/account", account_page),
         web.post("/account/password", account_password),
     ])
+    import web_premium  # Premium bo'limi: web_premium.py (o'zi bu fayldan yordamchilarni oladi)
+    web_premium.setup(app)
     return app

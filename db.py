@@ -70,6 +70,46 @@ CREATE TABLE IF NOT EXISTS shared_posts (
     poll_id INT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Premium konkursi: post, muddat va kanal posti
+CREATE TABLE IF NOT EXISTS giveaways (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    button_text TEXT NOT NULL DEFAULT '🚀 Boshlash',
+    image BYTEA,
+    image_ver INT NOT NULL DEFAULT 0,
+    file_id TEXT,
+    ends_at TIMESTAMPTZ NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    message_id BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- ishtirokchilar: status 'started' — Boshlashni bosgan, 'joined' — raqam olgan, 'left' — kanaldan chiqqan
+CREATE TABLE IF NOT EXISTS giveaway_entries (
+    giveaway_id INT NOT NULL REFERENCES giveaways(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    number INT,
+    full_name TEXT NOT NULL DEFAULT '',
+    username TEXT,
+    phone TEXT,
+    status TEXT NOT NULL DEFAULT 'started',
+    is_winner BOOLEAN NOT NULL DEFAULT FALSE,
+    won_at TIMESTAMPTZ,
+    notified_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    joined_at TIMESTAMPTZ,
+    PRIMARY KEY (giveaway_id, user_id),
+    UNIQUE (giveaway_id, number)
+);
+CREATE INDEX IF NOT EXISTS giveaway_entries_status_idx ON giveaway_entries(giveaway_id, status);
+-- botda kimga post yuborilgani (message_id NULL — yuborib bo'lmadi, masalan botni bloklagan)
+CREATE TABLE IF NOT EXISTS giveaway_messages (
+    giveaway_id INT NOT NULL REFERENCES giveaways(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    message_id BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (giveaway_id, user_id)
+);
 """
 
 
@@ -458,3 +498,243 @@ async def export_votes(poll_id):
         "LEFT JOIN users u ON u.user_id=v.user_id WHERE v.poll_id=$1 ORDER BY v.created_at",
         poll_id,
     )
+
+
+# --- premium (Telegram Premium konkursi) ---
+GW_FIRST_NUMBER = 70001
+_GW_COLS = ("id, title, description, button_text, image_ver, ends_at, is_active, message_id, created_at, "
+            "image IS NOT NULL AS has_image")
+
+
+async def gw_create(title, description, button_text, ends_at) -> int:
+    """Yangi konkurs; avvalgi faol konkurs yopiladi."""
+    async with pool.acquire() as c, c.transaction():
+        await c.execute("UPDATE giveaways SET is_active=FALSE WHERE is_active")
+        return await c.fetchval(
+            "INSERT INTO giveaways(title, description, button_text, ends_at) VALUES($1, $2, $3, $4) RETURNING id",
+            title, description, button_text, ends_at,
+        )
+
+
+async def gw_get(gid):
+    return await pool.fetchrow(f"SELECT {_GW_COLS} FROM giveaways WHERE id=$1", gid)
+
+
+async def gw_active():
+    return await pool.fetchrow(f"SELECT {_GW_COLS} FROM giveaways WHERE is_active ORDER BY id DESC LIMIT 1")
+
+
+async def gw_last():
+    return await pool.fetchrow(f"SELECT {_GW_COLS} FROM giveaways ORDER BY id DESC LIMIT 1")
+
+
+async def gw_list():
+    """Barcha konkurslar yangidan eskiga, ishtirokchilar soni bilan"""
+    return await pool.fetch(
+        "SELECT g.id, g.title, g.is_active, g.created_at, g.ends_at, "
+        "(SELECT COUNT(*) FROM giveaway_entries e WHERE e.giveaway_id=g.id AND e.number IS NOT NULL) AS joined "
+        "FROM giveaways g ORDER BY g.id DESC"
+    )
+
+
+async def gw_update(gid, title, description, button_text, ends_at):
+    await pool.execute(
+        "UPDATE giveaways SET title=$2, description=$3, button_text=$4, ends_at=$5 WHERE id=$1",
+        gid, title, description, button_text, ends_at,
+    )
+
+
+async def gw_set_ends(gid, ends_at):
+    await pool.execute("UPDATE giveaways SET ends_at=$2 WHERE id=$1", gid, ends_at)
+
+
+async def gw_set_image(gid, data: bytes | None):
+    await pool.execute(
+        "UPDATE giveaways SET image=$2, image_ver=image_ver+1, file_id=NULL WHERE id=$1", gid, data
+    )
+
+
+async def gw_get_image(gid, ver):
+    return await pool.fetchval("SELECT image FROM giveaways WHERE id=$1 AND image_ver=$2", gid, ver)
+
+
+async def gw_file(gid):
+    """(image, image_ver, file_id) — post rasmi va uning Telegramdagi file_id si"""
+    return await pool.fetchrow("SELECT image, image_ver, file_id FROM giveaways WHERE id=$1", gid)
+
+
+async def gw_set_file_id(gid, ver, file_id):
+    await pool.execute("UPDATE giveaways SET file_id=$3 WHERE id=$1 AND image_ver=$2", gid, ver, file_id)
+
+
+async def gw_set_message_id(gid, message_id):
+    await pool.execute("UPDATE giveaways SET message_id=$2 WHERE id=$1", gid, message_id)
+
+
+async def gw_entry(gid, user_id):
+    return await pool.fetchrow(
+        "SELECT user_id, number, full_name, username, phone, status, is_winner FROM giveaway_entries "
+        "WHERE giveaway_id=$1 AND user_id=$2",
+        gid, user_id,
+    )
+
+
+async def gw_touch(gid, user_id, full_name, username):
+    """Boshlashni bosgan foydalanuvchini yozib qo'yadi (hali raqamsiz)."""
+    await pool.execute(
+        "INSERT INTO giveaway_entries(giveaway_id, user_id, full_name, username) VALUES($1, $2, $3, $4) "
+        "ON CONFLICT(giveaway_id, user_id) DO UPDATE SET full_name=EXCLUDED.full_name, username=EXCLUDED.username",
+        gid, user_id, full_name, username,
+    )
+
+
+async def gw_join(gid, user_id, full_name, username) -> int:
+    """Ishtirok raqamini beradi (avval berilgan bo'lsa, o'shani qaytaradi) va holatni 'joined' qiladi."""
+    async with pool.acquire() as c, c.transaction():
+        # raqamlar ketma-ket va takrorlanmasligi uchun konkurs qatori qulflanadi
+        await c.execute("SELECT 1 FROM giveaways WHERE id=$1 FOR UPDATE", gid)
+        number = await c.fetchval(
+            "SELECT number FROM giveaway_entries WHERE giveaway_id=$1 AND user_id=$2", gid, user_id
+        )
+        if number is None:
+            number = await c.fetchval(
+                "SELECT COALESCE(MAX(number), $2) + 1 FROM giveaway_entries WHERE giveaway_id=$1",
+                gid, GW_FIRST_NUMBER - 1,
+            )
+        await c.execute(
+            "INSERT INTO giveaway_entries(giveaway_id, user_id, number, full_name, username, status, joined_at) "
+            "VALUES($1, $2, $3, $4, $5, 'joined', now()) ON CONFLICT(giveaway_id, user_id) DO UPDATE SET "
+            "number=EXCLUDED.number, full_name=EXCLUDED.full_name, username=EXCLUDED.username, status='joined', "
+            "joined_at=COALESCE(giveaway_entries.joined_at, now())",
+            gid, user_id, number, full_name, username,
+        )
+        return number
+
+
+async def gw_set_phone(gid, user_id, phone) -> bool:
+    res = await pool.execute(
+        "UPDATE giveaway_entries SET phone=$3 WHERE giveaway_id=$1 AND user_id=$2", gid, user_id, phone
+    )
+    return res.endswith(" 1")
+
+
+async def gw_mark_left(gid, user_id):
+    await pool.execute(
+        "UPDATE giveaway_entries SET status='left' WHERE giveaway_id=$1 AND user_id=$2 AND status='joined'",
+        gid, user_id,
+    )
+
+
+async def gw_mark_back(gid, user_id):
+    await pool.execute(
+        "UPDATE giveaway_entries SET status='joined' WHERE giveaway_id=$1 AND user_id=$2 AND status='left'",
+        gid, user_id,
+    )
+
+
+async def gw_stats(gid, since):
+    """started — hammasi (Boshlashni bosganlar), joined/left/pending — holatlar, today — bugun raqam olganlar"""
+    return await pool.fetchrow(
+        "SELECT COUNT(*) AS started, COUNT(*) FILTER (WHERE status='joined') AS joined, "
+        "COUNT(*) FILTER (WHERE status='left') AS left_n, COUNT(*) FILTER (WHERE status='started') AS pending, "
+        "COUNT(*) FILTER (WHERE joined_at >= $2) AS today, COUNT(*) FILTER (WHERE phone IS NOT NULL) AS phones "
+        "FROM giveaway_entries WHERE giveaway_id=$1",
+        gid, since,
+    )
+
+
+async def gw_entries(gid, q="", status="all", limit=50, offset=0):
+    """(qatorlar, jami_mos). q — ism, username, ID, telefon yoki ishtirok raqami bo'yicha qidiruv."""
+    q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    rows = await pool.fetch(
+        "SELECT user_id, number, full_name, username, phone, status, is_winner, "
+        "COALESCE(joined_at, created_at) AS at, COUNT(*) OVER() AS total FROM giveaway_entries "
+        "WHERE giveaway_id=$1 AND ($2='' OR full_name ILIKE '%'||$2||'%' "
+        "OR username ILIKE '%'||ltrim($2, '@')||'%' OR user_id::text LIKE $2||'%' "
+        "OR phone LIKE '%'||$2||'%' OR number::text LIKE ltrim($2, '#')||'%') "
+        "AND ($3='all' OR status=$3) "
+        "ORDER BY COALESCE(joined_at, created_at) DESC, user_id DESC LIMIT $4 OFFSET $5",
+        gid, q, status, limit, offset,
+    )
+    return rows, (rows[0]["total"] if rows else 0)
+
+
+async def gw_random_entry(gid):
+    """Obunada qolgan, hali g'olib bo'lmagan tasodifiy ishtirokchi"""
+    return await pool.fetchrow(
+        "SELECT user_id, number, full_name, username, phone FROM giveaway_entries "
+        "WHERE giveaway_id=$1 AND status='joined' AND NOT is_winner ORDER BY random() LIMIT 1",
+        gid,
+    )
+
+
+async def gw_mark_winner(gid, user_id):
+    await pool.execute(
+        "UPDATE giveaway_entries SET is_winner=TRUE, won_at=now() WHERE giveaway_id=$1 AND user_id=$2",
+        gid, user_id,
+    )
+
+
+async def gw_winners(gid):
+    return await pool.fetch(
+        "SELECT user_id, number, full_name, username, phone, status, won_at, notified_at FROM giveaway_entries "
+        "WHERE giveaway_id=$1 AND is_winner ORDER BY won_at",
+        gid,
+    )
+
+
+async def gw_set_notified(gid, user_id):
+    await pool.execute(
+        "UPDATE giveaway_entries SET notified_at=now() WHERE giveaway_id=$1 AND user_id=$2", gid, user_id
+    )
+
+
+async def gw_unsent_users(gid) -> list[int]:
+    """Bot foydalanuvchilaridan hali bu post yuborilmaganlar"""
+    rows = await pool.fetch(
+        "SELECT u.user_id FROM users u WHERE NOT EXISTS (SELECT 1 FROM giveaway_messages m "
+        "WHERE m.giveaway_id=$1 AND m.user_id=u.user_id) ORDER BY u.created_at",
+        gid,
+    )
+    return [r[0] for r in rows]
+
+
+async def gw_unsent_count(gid) -> int:
+    return await pool.fetchval(
+        "SELECT COUNT(*) FROM users u WHERE NOT EXISTS (SELECT 1 FROM giveaway_messages m "
+        "WHERE m.giveaway_id=$1 AND m.user_id=u.user_id)",
+        gid,
+    )
+
+
+async def gw_add_message(gid, user_id, message_id):
+    await pool.execute(
+        "INSERT INTO giveaway_messages(giveaway_id, user_id, message_id) VALUES($1, $2, $3) "
+        "ON CONFLICT DO NOTHING",
+        gid, user_id, message_id,
+    )
+
+
+async def gw_messages(gid):
+    """[(user_id, message_id), ...] — botda yuborilgan nusxalar (tahrirlash uchun)"""
+    rows = await pool.fetch(
+        "SELECT user_id, message_id FROM giveaway_messages WHERE giveaway_id=$1 AND message_id IS NOT NULL", gid
+    )
+    return [tuple(r) for r in rows]
+
+
+async def gw_drop_message(gid, user_id):
+    """Nusxa o'chirilgan yoki foydalanuvchi botni bloklagan — endi tahrirlanmaydi."""
+    await pool.execute(
+        "UPDATE giveaway_messages SET message_id=NULL WHERE giveaway_id=$1 AND user_id=$2", gid, user_id
+    )
+
+
+async def gw_message_stats(gid):
+    """(yetkazilgan, yuborib bo'lmagan)"""
+    r = await pool.fetchrow(
+        "SELECT COUNT(*) FILTER (WHERE message_id IS NOT NULL), COUNT(*) FILTER (WHERE message_id IS NULL) "
+        "FROM giveaway_messages WHERE giveaway_id=$1",
+        gid,
+    )
+    return r[0], r[1]
