@@ -109,6 +109,65 @@ CREATE TABLE IF NOT EXISTS giveaway_messages (
     message_id BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (giveaway_id, user_id)
+);-- Premium va Reklama uchun qo'lda qo'shilgan kanal/guruhlar (Obunalar ro'yxatidan alohida)
+CREATE TABLE IF NOT EXISTS post_targets (
+    id SERIAL PRIMARY KEY,
+    chat_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Premium postining kanal/guruhlardagi nusxalari (tahrirda hammasi yangilanadi)
+CREATE TABLE IF NOT EXISTS giveaway_posts (
+    giveaway_id INT NOT NULL REFERENCES giveaways(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL,
+    message_id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (giveaway_id, chat_id, message_id)
+);
+-- Reklama: status draft | scheduled | sending | paused | done | stopped | deleted
+CREATE TABLE IF NOT EXISTS ads (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    media BYTEA,
+    media_type TEXT,
+    media_name TEXT,
+    media_ver INT NOT NULL DEFAULT 0,
+    file_id TEXT,
+    buttons TEXT NOT NULL DEFAULT '',
+    to_bot BOOLEAN NOT NULL DEFAULT TRUE,
+    audience TEXT NOT NULL DEFAULT 'all',
+    audience_days INT NOT NULL DEFAULT 7,
+    audience_users TEXT NOT NULL DEFAULT '',
+    targets TEXT[] NOT NULL DEFAULT '{}',
+    silent BOOLEAN NOT NULL DEFAULT FALSE,
+    no_preview BOOLEAN NOT NULL DEFAULT FALSE,
+    protect BOOLEAN NOT NULL DEFAULT FALSE,
+    pin BOOLEAN NOT NULL DEFAULT FALSE,
+    delete_after INT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    scheduled_at TIMESTAMPTZ,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- har bir qabul qiluvchi: queued | sent | blocked | failed | skipped | deleted
+CREATE TABLE IF NOT EXISTS ad_deliveries (
+    ad_id INT NOT NULL REFERENCES ads(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL,
+    message_id BIGINT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    sent_at TIMESTAMPTZ,
+    PRIMARY KEY (ad_id, chat_id)
+);
+CREATE INDEX IF NOT EXISTS ad_deliveries_status_idx ON ad_deliveries(ad_id, status);
+CREATE INDEX IF NOT EXISTS ad_deliveries_sent_idx ON ad_deliveries(status, sent_at);
+CREATE TABLE IF NOT EXISTS ad_clicks (
+    ad_id INT NOT NULL REFERENCES ads(id) ON DELETE CASCADE,
+    button INT NOT NULL,
+    clicks INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (ad_id, button)
 );
 """
 
@@ -738,3 +797,255 @@ async def gw_message_stats(gid):
         gid,
     )
     return r[0], r[1]
+
+
+# --- joylash joylari (qo'lda qo'shilgan kanal/guruhlar) ---
+async def targets_list():
+    """[(id, chat_id, title), ...]"""
+    return await _all("SELECT id, chat_id, title FROM post_targets ORDER BY id")
+
+
+async def target_add(chat_id, title):
+    return await pool.fetchval(
+        "INSERT INTO post_targets(chat_id, title) VALUES($1, $2) ON CONFLICT(chat_id) DO NOTHING RETURNING id",
+        chat_id, title,
+    )
+
+
+async def target_delete(target_id):
+    await pool.execute("DELETE FROM post_targets WHERE id=$1", target_id)
+
+
+async def gw_add_post(gid, chat_id, message_id):
+    await pool.execute(
+        "INSERT INTO giveaway_posts(giveaway_id, chat_id, message_id) VALUES($1, $2, $3) ON CONFLICT DO NOTHING",
+        gid, chat_id, message_id,
+    )
+
+
+async def gw_posts(gid):
+    """[(chat_id, message_id), ...] — Premium postining kanal/guruhlardagi nusxalari"""
+    return await _all(
+        "SELECT chat_id, message_id FROM giveaway_posts WHERE giveaway_id=$1 ORDER BY created_at", gid
+    )
+
+
+# --- reklama ---
+_AD_COLS = ("id, title, text, media_type, media_name, media_ver, media IS NOT NULL AS has_media, buttons, to_bot, "
+            "audience, audience_days, audience_users, targets, silent, no_preview, protect, pin, delete_after, "
+            "status, scheduled_at, started_at, finished_at, created_by, created_at")
+_AD_COPY = ("title, text, media, media_type, media_name, buttons, to_bot, audience, audience_days, audience_users, "
+            "targets, silent, no_preview, protect, pin, delete_after")
+
+# auditoriya: $1 — N kun, $2 — aniq akkauntlar ID lari
+_AUDIENCE = {
+    "all": "TRUE",
+    "voted": "EXISTS (SELECT 1 FROM votes v WHERE v.user_id=u.user_id AND v.poll_id=(SELECT MAX(id) FROM polls))",
+    "not_voted": "NOT EXISTS (SELECT 1 FROM votes v WHERE v.user_id=u.user_id "
+                 "AND v.poll_id=(SELECT MAX(id) FROM polls))",
+    "premium": "EXISTS (SELECT 1 FROM giveaway_entries e WHERE e.user_id=u.user_id AND e.number IS NOT NULL "
+               "AND e.giveaway_id=(SELECT MAX(id) FROM giveaways))",
+    "not_premium": "NOT EXISTS (SELECT 1 FROM giveaway_entries e WHERE e.user_id=u.user_id AND e.number IS NOT NULL "
+                   "AND e.giveaway_id=(SELECT MAX(id) FROM giveaways))",
+    "new": "u.created_at >= now() - make_interval(days => $1)",
+    "users": "u.user_id = ANY($2::bigint[])",
+}
+
+
+def _audience_sql(select: str, kind: str) -> str:
+    where = _AUDIENCE.get(kind, "FALSE")
+    # ikkala parametr ham har doim ishlatilsin (PostgreSQL turini aniqlay olishi uchun)
+    return f"SELECT {select} FROM users u WHERE ({where}) AND $1::int IS NOT NULL AND $2::bigint[] IS NOT NULL"
+
+
+async def ad_audience(kind, days=7, ids=()) -> list[int]:
+    rows = await pool.fetch(_audience_sql("u.user_id", kind), days, list(ids))
+    return [r[0] for r in rows]
+
+
+async def ad_audience_count(kind, days=7, ids=()) -> int:
+    return await pool.fetchval(_audience_sql("COUNT(*)", kind), days, list(ids))
+
+
+async def users_existing(ids) -> set[int]:
+    rows = await pool.fetch("SELECT user_id FROM users WHERE user_id = ANY($1::bigint[])", list(ids))
+    return {r[0] for r in rows}
+
+
+async def users_by_usernames(names) -> dict[str, int]:
+    """{username (kichik harfda): user_id}"""
+    rows = await pool.fetch(
+        "SELECT lower(username), user_id FROM users WHERE lower(username) = ANY($1::text[])", list(names)
+    )
+    return {r[0]: r[1] for r in rows}
+
+
+async def ad_create(title, created_by) -> int:
+    return await pool.fetchval(
+        "INSERT INTO ads(title, created_by) VALUES($1, $2) RETURNING id", title, created_by
+    )
+
+
+async def ad_copy(ad_id, created_by) -> int | None:
+    return await pool.fetchval(
+        f"INSERT INTO ads({_AD_COPY}, created_by) SELECT {_AD_COPY}, $2 FROM ads WHERE id=$1 RETURNING id",
+        ad_id, created_by,
+    )
+
+
+async def ad_get(ad_id):
+    return await pool.fetchrow(f"SELECT {_AD_COLS} FROM ads WHERE id=$1", ad_id)
+
+
+async def ad_list():
+    """Reklamalar yangidan eskiga: yuborish va bosish sonlari bilan"""
+    return await pool.fetch(
+        "SELECT a.id, a.title, a.status, a.to_bot, a.audience, a.audience_days, cardinality(a.targets) AS n_targets, "
+        "a.scheduled_at, a.started_at, a.finished_at, a.created_at, a.created_by, "
+        "COALESCE(d.total, 0) AS total, COALESCE(d.sent, 0) AS sent, COALESCE(c.clicks, 0) AS clicks FROM ads a "
+        "LEFT JOIN (SELECT ad_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE status IN ('sent', 'deleted')) AS sent "
+        "FROM ad_deliveries GROUP BY ad_id) d ON d.ad_id=a.id "
+        "LEFT JOIN (SELECT ad_id, SUM(clicks) AS clicks FROM ad_clicks GROUP BY ad_id) c ON c.ad_id=a.id "
+        "ORDER BY a.id DESC"
+    )
+
+
+async def ad_update(ad_id, *, title, text, buttons, to_bot, audience, audience_days, audience_users, targets,
+                    silent, no_preview, protect, pin, delete_after):
+    await pool.execute(
+        "UPDATE ads SET title=$2, text=$3, buttons=$4, to_bot=$5, audience=$6, audience_days=$7, audience_users=$8, "
+        "targets=$9::text[], silent=$10, no_preview=$11, protect=$12, pin=$13, delete_after=$14 WHERE id=$1",
+        ad_id, title, text, buttons, to_bot, audience, audience_days, audience_users, list(targets),
+        silent, no_preview, protect, pin, delete_after,
+    )
+
+
+async def ad_set_media(ad_id, data, media_type, name):
+    await pool.execute(
+        "UPDATE ads SET media=$2, media_type=$3, media_name=$4, media_ver=media_ver+1, file_id=NULL WHERE id=$1",
+        ad_id, data, media_type, name,
+    )
+
+
+async def ad_get_media(ad_id, ver):
+    """(media, media_type, media_name) yoki None"""
+    return await pool.fetchrow(
+        "SELECT media, media_type, media_name FROM ads WHERE id=$1 AND media_ver=$2 AND media IS NOT NULL",
+        ad_id, ver,
+    )
+
+
+async def ad_file(ad_id):
+    return await pool.fetchrow("SELECT media, media_type, media_name, media_ver, file_id FROM ads WHERE id=$1", ad_id)
+
+
+async def ad_set_file_id(ad_id, ver, file_id):
+    await pool.execute("UPDATE ads SET file_id=$3 WHERE id=$1 AND media_ver=$2", ad_id, ver, file_id)
+
+
+async def ad_set_status(ad_id, status):
+    await pool.execute("UPDATE ads SET status=$2 WHERE id=$1", ad_id, status)
+
+
+async def ad_schedule(ad_id, at):
+    await pool.execute("UPDATE ads SET status='scheduled', scheduled_at=$2 WHERE id=$1", ad_id, at)
+
+
+async def ad_set_scheduled_at(ad_id, at):
+    await pool.execute("UPDATE ads SET scheduled_at=$2 WHERE id=$1", ad_id, at)
+
+
+async def ad_delete(ad_id):
+    await pool.execute("DELETE FROM ads WHERE id=$1", ad_id)
+
+
+async def ad_queue(ad_id, recipients) -> bool:
+    """Qabul qiluvchilarni navbatga yozadi va holatni 'sending' qiladi (faqat qoralama/rejalashtirilgan bo'lsa)."""
+    async with pool.acquire() as c, c.transaction():
+        ok = await c.fetchval(
+            "UPDATE ads SET status='sending', started_at=now() WHERE id=$1 AND status IN ('draft', 'scheduled') "
+            "RETURNING TRUE", ad_id,
+        )
+        if not ok:
+            return False
+        await c.execute(
+            "INSERT INTO ad_deliveries(ad_id, chat_id) SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING",
+            ad_id, list(recipients),
+        )
+        return True
+
+
+async def ad_finish(ad_id, status):
+    await pool.execute("UPDATE ads SET status=$2, finished_at=now() WHERE id=$1", ad_id, status)
+
+
+async def ad_next_batch(ad_id, limit=100) -> list[str]:
+    rows = await pool.fetch(
+        "SELECT chat_id FROM ad_deliveries WHERE ad_id=$1 AND status='queued' LIMIT $2", ad_id, limit
+    )
+    return [r[0] for r in rows]
+
+
+async def ad_mark(ad_id, chat_id, status, message_id=None):
+    await pool.execute(
+        "UPDATE ad_deliveries SET status=$3, message_id=COALESCE($4, message_id), "
+        "sent_at=CASE WHEN $3='sent' THEN now() ELSE sent_at END WHERE ad_id=$1 AND chat_id=$2",
+        ad_id, chat_id, status, message_id,
+    )
+
+
+async def ad_skip_rest(ad_id):
+    await pool.execute("UPDATE ad_deliveries SET status='skipped' WHERE ad_id=$1 AND status='queued'", ad_id)
+
+
+async def ad_counts(ad_id) -> dict[str, int]:
+    rows = await pool.fetch("SELECT status, COUNT(*) FROM ad_deliveries WHERE ad_id=$1 GROUP BY status", ad_id)
+    return {r[0]: r[1] for r in rows}
+
+
+async def ad_sent_messages(ad_id):
+    """[(chat_id, message_id), ...] — yetkazilgan va hali o'chirilmagan xabarlar"""
+    return await _all(
+        "SELECT chat_id, message_id FROM ad_deliveries WHERE ad_id=$1 AND status='sent' AND message_id IS NOT NULL",
+        ad_id,
+    )
+
+
+async def ad_last_sent_at(ad_id):
+    return await pool.fetchval("SELECT MAX(sent_at) FROM ad_deliveries WHERE ad_id=$1", ad_id)
+
+
+async def ad_due_deletes(limit=200):
+    """[(ad_id, chat_id, message_id), ...] — avto-o'chirish vaqti kelgan xabarlar"""
+    return await _all(
+        "SELECT d.ad_id, d.chat_id, d.message_id FROM ad_deliveries d JOIN ads a ON a.id=d.ad_id "
+        "WHERE d.status='sent' AND d.message_id IS NOT NULL AND a.delete_after IS NOT NULL "
+        "AND d.sent_at <= now() - make_interval(hours => a.delete_after) LIMIT $1",
+        limit,
+    )
+
+
+async def ad_due_scheduled() -> list[int]:
+    rows = await pool.fetch(
+        "SELECT id FROM ads WHERE status='scheduled' AND scheduled_at <= now() ORDER BY scheduled_at"
+    )
+    return [r[0] for r in rows]
+
+
+async def ad_sending_ids() -> list[int]:
+    """Yuborilishi kerak bo'lganlar navbat tartibida"""
+    rows = await pool.fetch("SELECT id FROM ads WHERE status='sending' ORDER BY started_at, id")
+    return [r[0] for r in rows]
+
+
+async def ad_click(ad_id, button):
+    await pool.execute(
+        "INSERT INTO ad_clicks(ad_id, button, clicks) SELECT $1, $2, 1 WHERE EXISTS (SELECT 1 FROM ads WHERE id=$1) "
+        "ON CONFLICT(ad_id, button) DO UPDATE SET clicks=ad_clicks.clicks+1",
+        ad_id, button,
+    )
+
+
+async def ad_clicks(ad_id) -> dict[int, int]:
+    rows = await pool.fetch("SELECT button, clicks FROM ad_clicks WHERE ad_id=$1", ad_id)
+    return {r[0]: r[1] for r in rows}

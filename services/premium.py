@@ -167,16 +167,30 @@ async def send_post(bot: Bot, chat_id: int, g, record: bool = True):
     return msg
 
 
-async def publish_channel(bot: Bot, gid: int) -> int:
-    if not RESULTS_CHANNEL:
-        raise RuntimeError(".env faylida RESULTS_CHANNEL ko'rsatilmagan")
+async def posts(g) -> list[tuple[str, int]]:
+    """Kanal/guruhlardagi barcha nusxalar. Avvalgi usulda (faqat natijalar kanaliga) joylangani ham qo'shiladi."""
+    rows = list(await db.gw_posts(g["id"]))
+    if g["message_id"] and RESULTS_CHANNEL and (RESULTS_CHANNEL, g["message_id"]) not in rows:
+        rows.insert(0, (RESULTS_CHANNEL, g["message_id"]))
+    return rows
+
+
+async def publish_to(bot: Bot, gid: int, chat_ids: list[str]) -> list[tuple[str, str | None]]:
+    """Postni tanlangan kanal/guruhlarga joylaydi: [(chat_id, None yoki xato matni), ...]"""
     g = await db.gw_get(gid)
-    photo = await _photo(g)
-    msg = await _send(bot, RESULTS_CHANNEL, post_text(g), photo, await channel_markup(bot, g))
-    if isinstance(photo, BufferedInputFile):
-        await _remember(g, msg)
-    await db.gw_set_message_id(gid, msg.message_id)
-    return msg.message_id
+    text, photo, markup = post_text(g), await _photo(g), await channel_markup(bot, g)
+    result = []
+    for chat_id in chat_ids:
+        try:
+            msg = await _call(lambda: _send(bot, chat_id, text, photo, markup))
+            if isinstance(photo, BufferedInputFile):
+                photo = await _remember(g, msg) or photo
+            await db.gw_add_post(gid, chat_id, msg.message_id)
+            result.append((chat_id, None))
+        except Exception as e:
+            logging.warning("premium joylash %s: %s", chat_id, e)
+            result.append((chat_id, str(e)))
+    return result
 
 
 # --- fon vazifalari: botda tarqatish va nusxalarni yangilash ---
@@ -271,9 +285,8 @@ async def _refresh(bot: Bot, gid: int):
     media = gid in _media_pending
     g = await db.gw_get(gid)
     text, photo = post_text(g), await _photo(g)
-    targets = []
-    if g["message_id"] and RESULTS_CHANNEL:
-        targets.append((RESULTS_CHANNEL, g["message_id"], await channel_markup(bot, g), False))
+    channel_kb = await channel_markup(bot, g)
+    targets = [(chat_id, mid, channel_kb, False) for chat_id, mid in await posts(g)]
     markup = bot_markup(g)
     targets += [(uid, mid, markup, True) for uid, mid in await db.gw_messages(gid)]
     for chat_id, mid, kb, private in targets:

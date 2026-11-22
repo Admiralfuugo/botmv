@@ -65,7 +65,7 @@ async def guard(request: web.Request, handler):
         if origin and urlparse(origin).netloc != request.host:
             return web.Response(status=403, text="Origin mos emas")
     # /media/ — post rasmlari: Telegram ularni login'siz yuklab oladi
-    if request.path in PUBLIC or (request.method == "GET" and request.path.startswith("/media/")):
+    if request.path in PUBLIC or (request.method == "GET" and request.path.startswith(("/media/", "/r/"))):
         return await handler(request)
     admin = await _session_admin(request)
     if admin:
@@ -144,6 +144,7 @@ ICONS = {
              'l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/>',
     "gift": '<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/>'
             '<path d="M7.5 8a2.5 2.5 0 0 1 0-5C10 3 12 8 12 8s2-5 4.5-5a2.5 2.5 0 0 1 0 5"/>',
+    "megaphone": '<path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>',
 }
 
 
@@ -357,6 +358,8 @@ select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--
 .tg-btn{display:block;text-align:center;background:var(--surface);border-radius:8px;padding:8px 10px;margin-top:4px;font-size:13px;font-weight:550;color:var(--accent);box-shadow:var(--shadow);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .inline-form{display:flex;gap:6px;align-items:center}
 .inline-form input{height:30px;font-size:13px;width:170px}
+.nav{min-width:0;overflow-x:auto;scrollbar-width:none} .nav::-webkit-scrollbar{display:none}
+@media (min-width:721px) and (max-width:1180px){.nav a{padding:7px 9px;gap:6px}}
 """
 
 THEME_JS = "try{var t=localStorage.getItem('theme');if(t)document.documentElement.dataset.theme=t}catch(e){}"
@@ -394,9 +397,22 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
     pr_winner:"G'olib aniqlandi",pr_nobody:"Tanlash uchun ishtirokchi qolmadi",
     pr_tgerr:"Kanal obunasini tekshirib bo'lmadi — bot kanalda admin ekanini tekshiring",
     pr_sent:"Tabrik yuborildi",pr_blocked:"Yuborib bo'lmadi: foydalanuvchi botni bloklagan",
-    pr_senderr:"Xabarni yuborib bo'lmadi",pr_notext:"Xabar matni bo'sh",pr_closed:"Bu konkurs yopilgan"};
+    pr_senderr:"Xabarni yuborib bo'lmadi",pr_notext:"Xabar matni bo'sh",pr_closed:"Bu konkurs yopilgan",
+    tg_bad:"Manzil noto'g'ri: @username, -100… ID yoki t.me/… havola kiriting",
+    tg_missing:"Bot bu kanal/guruhni ko'ra olmayapti — avval botni u yerga qo'shing",
+    tg_added:"Joy qo'shildi",tg_noadmin:"Qo'shildi, lekin bot u yerda admin emas — hozircha joylab bo'lmaydi",
+    tg_deleted:"Joy ro'yxatdan olindi",ad_saved:"Saqlandi",ad_locked:"Yuborilgan reklamani tahrirlab bo'lmaydi — nusxa oling",
+    ad_badbtn:"Tugmalarda xato: har birini «Matn - https://…» ko'rinishida yozing",
+    ad_toolong:"Matn juda uzun: media bilan 1024, mediasiz 4096 belgigacha",ad_empty:"Matn yoki media qo'shing",
+    ad_noone:"Qabul qiluvchi yo'q: auditoriya yoki kanal/guruh tanlang",
+    ad_testbad:"Sinov akkaunti topilmadi — u botga /start bosgan bo'lishi kerak",ad_testsent:"Sinov xabari yuborildi",
+    ad_testfail:"Sinov xabarini yuborib bo'lmadi",ad_scheduled:"Reklama rejalashtirildi",ad_started:"Yuborish boshlandi",
+    ad_paused:"Pauza qilindi",ad_resumed:"Davom ettirildi",ad_stopped:"Yuborish to'xtatildi",
+    ad_deleting:"Xabarlar chatlardan o'chirilmoqda",ad_copied:"Nusxa olindi — yangi qoralama",
+    ad_removed:"Reklama o'chirildi",ad_unscheduled:"Rejalashtirish bekor qilindi"};
   var ERR={badtg:1,badurl:1,needlink:1,notitle:1,exists:1,baduser:1,shortpw:1,mismatch:1,badpw:1,lastsuper:1,self:1,forbidden:1,
-    pr_nowhere:1,pr_running:1,pr_notended:1,pr_nobody:1,pr_tgerr:1,pr_blocked:1,pr_senderr:1,pr_notext:1,pr_closed:1};
+    pr_nowhere:1,pr_running:1,pr_notended:1,pr_nobody:1,pr_tgerr:1,pr_blocked:1,pr_senderr:1,pr_notext:1,pr_closed:1,
+    tg_bad:1,tg_missing:1,tg_noadmin:1,ad_locked:1,ad_badbtn:1,ad_toolong:1,ad_empty:1,ad_noone:1,ad_testbad:1,ad_testfail:1};
   var u=new URL(location.href),m=u.searchParams.get('m');
   if(m&&MSG[m]){var t=document.getElementById('toast');t.textContent=MSG[m];t.classList.toggle('err',!!ERR[m]);
     requestAnimationFrame(function(){t.classList.add('show')});setTimeout(function(){t.classList.remove('show')},2800);
@@ -430,7 +446,7 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
 def _topbar(active: str) -> str:
     admin = current_admin.get()
     links = [("/", "dash", "Boshqaruv"), ("/polls", "list", "So'rovnomalar"), ("/premium", "gift", "Premium"),
-             ("/users", "users", "Foydalanuvchilar"), ("/channels", "link", "Obunalar")]
+             ("/ads", "megaphone", "Reklama"), ("/users", "users", "Foydalanuvchilar"), ("/channels", "link", "Obunalar")]
     if admin and admin[3]:
         links.append(("/admins", "shield", "Adminlar"))
     nav = "".join(
@@ -1425,4 +1441,6 @@ def make_app(bot) -> web.Application:
     ])
     import web_premium  # Premium bo'limi: web_premium.py (o'zi bu fayldan yordamchilarni oladi)
     web_premium.setup(app)
+    import web_ads  # Reklama bo'limi: web_ads.py (yo'nalishlar va rejalashtiruvchi fon vazifasi)
+    web_ads.setup(app)
     return app

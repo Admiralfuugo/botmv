@@ -34,7 +34,9 @@ C:\Users\fuugo\pgsql\bin\pg_ctl.exe -D C:\Users\fuugo\pgdata stop               
 - `db.py` — barcha SQL (jadvallar `init()` da avtomatik yaratiladi/yangilanadi)
 - `handlers/user.py` — bot: /start, obuna tekshiruvi, captcha, ovoz, /natija
 - `services/` — `channels.py` (obunalar, bazadan), `auth.py` (admin parollari, sessiya kaliti), `subscription.py` (Telegram obuna tekshiruvi), `results.py` (kanal posti)
-- Premium konkursi: `handlers/premium.py` (bot: /start premium, /premium, tasdiqlash, captcha, raqam #70001…, telefon), `services/premium.py` (post, kanal va botga tarqatish, g'olib), `web_premium.py` (panel: /premium). Jadvallar: `giveaways`, `giveaway_entries`, `giveaway_messages`
+- Premium konkursi: `handlers/premium.py` (bot: /start premium, /premium, tasdiqlash, captcha, raqam #70001…, telefon), `services/premium.py` (post, kanal va botga tarqatish, g'olib), `web_premium.py` (panel: /premium). Jadvallar: `giveaways`, `giveaway_entries`, `giveaway_messages`, `giveaway_posts`
+- Joylash joylari (Premium va Reklama uchun umumiy kanal/guruhlar): `services/targets.py`, jadval `post_targets`
+- Reklama: `services/ads.py` (matn tozalash, tugmalar, auditoriya, yuborish navbati, rejalashtiruvchi), `web_ads.py` (panel: /ads, tugma bosishlari /r/…). Jadvallar: `ads`, `ad_deliveries`, `ad_clicks`. Bosish statistikasi uchun `PUBLIC_URL` kerak
 
 ## Eslatmalar
 - Obuna kanallari va adminlar **paneldan** boshqariladi (`.env` dagi `REQUIRED_CHANNELS`/`FB_URL`/... faqat birinchi marta ko'chirilgan).

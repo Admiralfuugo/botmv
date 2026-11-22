@@ -3,7 +3,7 @@
 web.py dagi make_app() oxirida setup(app) chaqiriladi; sahifa uslubi va yordamchilar web.py dan olinadi.
 """
 import asyncio
-import logging
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
@@ -11,7 +11,8 @@ from aiohttp import web
 
 import db
 import web as panel
-from services import channels, premium
+from config import RESULTS_CHANNEL
+from services import channels, premium, targets
 
 e, icon, num, dt = panel.e, panel.icon, panel.num, panel.dt
 
@@ -35,7 +36,63 @@ STYLE = """<style>
 .win-meta{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;color:var(--muted)}
 .win-meta b{color:var(--text)}
 @media (max-width:560px){.win{flex-direction:column;gap:6px}}
+.tgt{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 0;border-top:1px solid var(--border)}
+.tgt:first-child{border-top:0}
+.tgt.off{opacity:.55;cursor:not-allowed}
+.tgt-name{flex:1;min-width:160px;color:var(--text);font-weight:550}
+.tgt-name .muted{font-weight:400}
+.tgt-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.tgt-add>summary{list-style:none;width:max-content}
+.tgt-add>summary::-webkit-details-marker{display:none}
+.tgt-form{display:flex;gap:8px;flex-wrap:wrap}
+.tgt-form input[type=text]{flex:1;min-width:180px}
+.alert.good{background:var(--good-soft);color:var(--good)}
 </style>"""
+
+# --- joylash joylari: Premium va Reklama sahifalari birga ishlatadi ---
+_ROLE_PILL = {"admin": '<span class="pill on">Bot admin</span>', "member": '<span class="pill on">Bot a\'zo</span>'}
+_STATE_PILL = {"noadmin": '<span class="pill bad">Bot admin emas</span>', "missing": '<span class="pill bad">Topilmadi</span>'}
+_SOURCE = {"results": "natijalar kanali", "obuna": "Obunalar", "added": "qo'shilgan"}
+# oxirgi joylash natijasi: giveaway_id -> [(nomi, xato yoki None)]; sahifada bir marta ko'rsatiladi
+_last_result: dict[int, list] = {}
+
+
+def target_checks(items: list[dict], checked=(), posted=(), name: str = "t") -> str:
+    """Kanal/guruhlar ro'yxati checkbox ko'rinishida; bot yoza olmaydiganlari o'chiq."""
+    if not items:
+        return '<p class="muted small" style="margin:0">Hali kanal yoki guruh yo\'q — «Joy qo\'shish» orqali qo\'shing.</p>'
+    checked = {c.lower() for c in checked}
+    posted = {c.lower() for c in posted}
+    out = []
+    for i in items:
+        key, ok = i["chat_id"].lower(), i["state"] == "ok"
+        pill = _ROLE_PILL.get(i["role"]) if ok else _STATE_PILL.get(i["state"], "")
+        done = ' <span class="pill accent plain">joylangan</span>' if key in posted else ""
+        attrs = (" checked" if ok and key in checked else "") + ("" if ok else " disabled")
+        out.append(
+            f'<label class="check tgt{"" if ok else " off"}"><input type=checkbox name={name} '
+            f'value="{e(i["chat_id"])}"{attrs}><span class=tgt-name>{"👥" if i["group"] else "📢"} {e(i["title"])} '
+            f'<span class="muted small">{e(i["chat_id"])} · {_SOURCE.get(i["source"], "")}</span></span>{pill}{done}</label>'
+        )
+    return "<div>" + "".join(out) + "</div>"
+
+
+def target_manage(items: list[dict], back: str) -> str:
+    """«Joy qo'shish»: qo'lda qo'shilgan kanal/guruhlar ro'yxati va qo'shish formasi."""
+    rows = "".join(
+        f'<div class=tgt-row><span>{e(i["title"])} <span class="muted small">{e(i["chat_id"])}</span></span>'
+        f'<form method=post action="/targets/{i["id"]}/delete" data-confirm="{e("«" + i["title"] + "» ro‘yxatdan olinsinmi?")}">'
+        f'<input type=hidden name=back value="{e(back)}"><button class="btn ghost icon-only sm" aria-label="O\'chirish" '
+        f'title="O\'chirish">{icon("trash")}</button></form></div>'
+        for i in items if i["source"] == "added"
+    )
+    form = (f'<form method=post action=/targets/add class=tgt-form><input type=hidden name=back value="{e(back)}">'
+            f'<input type=text name=chat_id required maxlength=80 placeholder="@kanal, -100… yoki t.me/…" '
+            f'aria-label="Kanal yoki guruh"><button class="btn primary">{icon("plus")}Qo\'shish</button></form>')
+    return (f'<details class=tgt-add><summary class="btn ghost sm">{icon("plus")}Joy qo\'shish</summary>'
+            f'<div class=stack style="margin-top:10px"><p class="muted small" style="margin:0">Botni avval kanalga '
+            f'<b>admin</b> qiling yoki guruhga qo\'shing. Nomi avtomatik olinadi.</p>{rows}{form}</div></details>')
+
 
 # botga yuborish jarayonini sahifani yangilamasdan ko'rsatadi
 PROGRESS_JS = """<script>(function(){var el=document.getElementById('pr-progress');
@@ -127,24 +184,40 @@ async def _progress_html(gid: int) -> str:
     return html_
 
 
-async def _publish_card(g) -> str:
+def _result_html(gid: int) -> str:
+    res = _last_result.pop(gid, None)
+    if not res:
+        return ""
+    ok = sum(1 for _, err in res if not err)
+    errors = "".join(f"<div>{e(title)}: {e(err)}</div>" for title, err in res if err)
+    html_ = f'<div class="alert {"warn" if errors else "good"}" style="margin-top:12px">✅ {ok} joyga joylandi'
+    if errors:
+        html_ += f", {len(res) - ok} ta xato:{errors}"
+    return html_ + "</div>"
+
+
+async def _publish_card(bot, g) -> str:
     gid = g["id"]
     unsent = await db.gw_unsent_count(gid)
-    posted = bool(g["message_id"])
-    ch_note = "allaqachon joylangan, yana bitta yangi post chiqadi" if posted else "natijalar kanaliga"
+    items = await targets.available(bot)
+    posted = [c for c, _ in await premium.posts(g)]
+    # birinchi joylashda natijalar kanali oldindan belgilanadi
+    checked = [] if posted else [RESULTS_CHANNEL]
     running = 1 if premium.sending(gid) else 0
-    confirm = e("Post tanlangan joylarga yuborilsinmi?")
+    confirm = e("Post tanlangan joylarga yuborilsinmi? Avval joylangan joyga yana bitta yangi post chiqadi.")
     return (
         f'<section class=card><div class=card-h><h2>Joylash</h2>'
         f'<span class="muted small">qayerga yuborishni tanlang</span></div>'
         f'<form method=post action="/premium/{gid}/publish" class=stack data-confirm="{confirm}">'
-        f'<label class=check><input type=checkbox name=channel{"" if posted else " checked"}>'
-        f'📢 Kanal <span class=muted>— {ch_note}</span></label>'
         f'<label class=check><input type=checkbox name=bot{" checked" if unsent else ""}>'
         f'🤖 Bot foydalanuvchilari <span class=muted>— yangi {num(unsent)} kishiga</span></label>'
+        f'<div><div class="muted small" style="margin-bottom:2px">Kanal va guruhlar</div>'
+        f'{target_checks(items, checked, posted)}</div>'
         f'<div><button class="btn primary">{icon("send")}Joylash</button></div></form>'
+        f'{_result_html(gid)}'
         f'<div id=pr-progress class="muted small" style="margin-top:14px" data-g="{gid}" data-running="{running}">'
-        f'{await _progress_html(gid)}</div></section>'
+        f'{await _progress_html(gid)}</div>'
+        f'<div style="margin-top:12px">{target_manage(items, f"/premium/{gid}")}</div></section>'
     )
 
 
@@ -288,9 +361,10 @@ async def _view(request: web.Request, g) -> str:
     else:
         status = '<span class="pill off">Yopilgan</span>'
     left = None if ended else panel.time_left(g["ends_at"])
+    n_posts = len(await premium.posts(g))
     meta = [f"Boshlangan <b>{dt(g['created_at'])}</b>",
             f"Tugash <b>{dt(g['ends_at'])}</b>" + (f" · {left} qoldi" if left else ""),
-            "Kanal posti: " + ("<b>joylangan</b>" if g["message_id"] else "<b>joylanmagan</b>")]
+            "Joylangan: " + (f"<b>{n_posts} joyda</b>" if n_posts else "<b>hali joylanmagan</b>")]
     actions = []
     if active:
         actions.append(f'<a class="btn outline" href="{e(premium.deep_link(me.username))}" target=_blank '
@@ -320,7 +394,7 @@ async def _view(request: web.Request, g) -> str:
                      f'<span class="muted small">saqlansa kanal va botdagi nusxalar ham yangilanadi</span></div>'
                      f'<form method=post action="/premium/{gid}/save" enctype=multipart/form-data class=gw-form>'
                      f'{_fields(g)}<div class=full><button class="btn primary">Saqlash</button></div></form></section>')
-        main = (f'<div class="split section"><div class=stack>{post_card}{await _publish_card(g)}</div>'
+        main = (f'<div class="split section"><div class=stack>{post_card}{await _publish_card(bot, g)}</div>'
                 f'<div class=stack>{await _preview(g)}</div></div>')
     else:
         main = f'<div class=section>{await _preview(g)}</div>'
@@ -412,24 +486,41 @@ async def gw_save(request: web.Request):
 async def gw_publish(request: web.Request):
     gid, g, back = await _editable(request)
     data = await request.post()
-    to_channel, to_bot = bool(data.get("channel")), bool(data.get("bot"))
-    if not (to_channel or to_bot):
-        _to(back, "pr_nowhere")
     bot = request.app["bot"]
-    if to_channel:
-        try:
-            await premium.publish_channel(bot, gid)
-        except Exception as ex:
-            logging.exception("premium kanalga joylash")
-            body = (f'<div class=ph><div><h1>Kanalga joylab bo\'lmadi</h1></div></div><section class="card stack">'
-                    f'<div class="alert danger">{e(str(ex))}</div>'
-                    f'<p class=muted style="margin:0">Bot natijalar kanalida admin ekanini va .env dagi '
-                    f'<b>RESULTS_CHANNEL</b> to\'g\'ri kanal ekanini tekshiring.</p>'
-                    f'<div><a class="btn outline" href="{back}">{icon("back")}Orqaga</a></div></section>')
-            return panel.page(body, title="Xatolik", active="gift", status=502)
+    items = await targets.available(bot)
+    dest = targets.pick(items, data.getall("t", []))
+    to_bot = bool(data.get("bot"))
+    if not (dest or to_bot):
+        _to(back, "pr_nowhere")
+    if dest:
+        titles = {i["chat_id"]: i["title"] for i in items}
+        _last_result[gid] = [(titles.get(c, c), err) for c, err in await premium.publish_to(bot, gid, dest)]
     if to_bot and not await premium.broadcast(bot, gid):
         _to(back, "pr_running")
     _to(back, "pr_published")
+
+
+def _safe_back(value) -> str:
+    return value if isinstance(value, str) and re.fullmatch(r"/(premium|ads)(/\d+)?", value) else "/premium"
+
+
+async def target_add(request: web.Request):
+    data = await request.post()
+    back = _safe_back(data.get("back"))
+    chat_id = targets.normalize(data.get("chat_id"))
+    if not chat_id:
+        _to(back, "tg_bad")
+    info = await targets.check(request.app["bot"], chat_id, fresh=True)
+    if info["state"] == "missing":
+        _to(back, "tg_missing")
+    await db.target_add(chat_id, (info["title"] or chat_id)[:64])
+    _to(back, "tg_added" if info["state"] == "ok" else "tg_noadmin")
+
+
+async def target_delete(request: web.Request):
+    data = await request.post()
+    await db.target_delete(int(request.match_info["id"]))
+    _to(_safe_back(data.get("back")), "tg_deleted")
 
 
 async def gw_end(request: web.Request):
@@ -508,4 +599,6 @@ def setup(app: web.Application):
         web.get(r"/premium/{id:\d+}/export.csv", gw_export),
         web.get(r"/premium/image/{id:\d+}-{ver:\d+}.jpg", gw_image),
         web.get("/api/premium/progress", api_progress),
+        web.post("/targets/add", target_add),
+        web.post(r"/targets/{id:\d+}/delete", target_delete),
     ])
