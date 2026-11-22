@@ -219,11 +219,12 @@ def last_job(gid: int) -> dict | None:
     return _send_jobs.get(gid)
 
 
-async def broadcast(bot: Bot, gid: int) -> bool:
-    """Postni hali olmagan barcha bot foydalanuvchilariga yuboradi. False — allaqachon ketmoqda."""
+async def broadcast(bot: Bot, gid: int, users: list[int] | None = None) -> bool:
+    """Postni bot foydalanuvchilariga yuboradi: users berilmasa — hali olmagan hammaga. False — allaqachon ketmoqda."""
     if sending(gid):
         return False
-    users = await db.gw_unsent_users(gid)
+    if users is None:
+        users = await db.gw_unsent_users(gid)
     job = {"running": True, "total": len(users), "done": 0, "sent": 0, "blocked": 0, "failed": 0, "error": ""}
     _send_jobs[gid] = job
     _spawn(_broadcast(bot, gid, users, job))

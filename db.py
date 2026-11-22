@@ -867,6 +867,21 @@ async def ad_audience_count(kind, days=7, ids=()) -> int:
     return await pool.fetchval(_audience_sql("COUNT(*)", kind), days, list(ids))
 
 
+def _gw_unsent_sql(select: str, kind: str) -> str:
+    """Auditoriyadan Premium postini hali olmaganlar ($3 — konkurs id si)."""
+    return (_audience_sql(select, kind) + " AND NOT EXISTS (SELECT 1 FROM giveaway_messages m "
+            "WHERE m.giveaway_id=$3 AND m.user_id=u.user_id)")
+
+
+async def gw_audience_unsent(gid, kind, days=7, ids=()) -> list[int]:
+    rows = await pool.fetch(_gw_unsent_sql("u.user_id", kind) + " ORDER BY u.created_at", days, list(ids), gid)
+    return [r[0] for r in rows]
+
+
+async def gw_audience_unsent_count(gid, kind, days=7, ids=()) -> int:
+    return await pool.fetchval(_gw_unsent_sql("COUNT(*)", kind), days, list(ids), gid)
+
+
 async def users_existing(ids) -> set[int]:
     rows = await pool.fetch("SELECT user_id FROM users WHERE user_id = ANY($1::bigint[])", list(ids))
     return {r[0] for r in rows}

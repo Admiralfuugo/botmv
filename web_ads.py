@@ -3,6 +3,7 @@
 web.py dagi make_app() oxirida setup(app) chaqiriladi: yo'nalishlar va rejalashtiruvchi fon vazifasi ulanadi.
 """
 import asyncio
+import html
 import mimetypes
 from datetime import datetime, timezone
 
@@ -23,13 +24,21 @@ STATUS = {
 EDITABLE = ("draft", "scheduled")
 
 STYLE = """<style>
-.ad [hidden]{display:none!important}
-.ad .split{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr)}
+.ad-grid{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:16px;align-items:start;
+  grid-template-areas:"content pv" "who pv" "set pv" "test pv" "act pv" "manage pv"}
+.ad-form{display:contents}
+.a-content{grid-area:content}.a-who{grid-area:who}.a-set{grid-area:set}.a-test{grid-area:test}
+.a-act{grid-area:act}.a-manage{grid-area:manage}
+.a-pv{grid-area:pv;align-self:stretch;min-width:0}
 .ad-pv{position:sticky;top:76px}
-.ad .bubble{white-space:pre-wrap;word-break:break-word}
-.ad .bubble img,.ad .bubble video{width:100%;max-height:380px;object-fit:cover;border-radius:8px;display:block;margin-bottom:8px}
+@media (max-width:900px){.ad-grid{grid-template-columns:minmax(0,1fr);
+  grid-template-areas:"content" "pv" "who" "set" "test" "act" "manage"}.ad-pv{position:static}}
+#ad-text{min-height:340px;font-size:15px;line-height:1.6}
+.ad .preview{padding:16px}
+.ad .bubble{white-space:pre-wrap;word-break:break-word;font-size:15px;line-height:1.5;min-height:56px}
+.ad .bubble img,.ad .bubble video{width:100%;max-height:420px;object-fit:cover;border-radius:8px;display:block;margin-bottom:8px}
 .ad .bubble blockquote{margin:4px 0;padding:2px 0 2px 10px;border-left:3px solid var(--accent);color:var(--text-2)}
-.ad .bubble code,.ad .bubble pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;background:var(--surface-2);border-radius:4px;padding:0 4px}
+.ad .bubble code,.ad .bubble pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;background:var(--surface-2);border-radius:4px;padding:0 4px}
 .ad .bubble pre{display:block;padding:8px;margin:4px 0;white-space:pre-wrap}
 .ad .spoiler{background:var(--text-2);color:transparent;border-radius:4px;transition:color .2s,background .2s}
 .ad .spoiler:hover{color:inherit;background:var(--surface-2)}
@@ -37,13 +46,10 @@ STYLE = """<style>
 .pv-row{display:flex;gap:4px}
 .pv-row .tg-btn{flex:1;min-width:0}
 .tb{display:flex;gap:4px;flex-wrap:wrap}
-.tb button{height:30px;min-width:34px;padding:0 9px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);border-radius:7px;cursor:pointer;font:inherit;font-size:13px}
+.tb button{height:32px;min-width:36px;padding:0 10px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);border-radius:7px;cursor:pointer;font:inherit;font-size:13.5px}
 .tb button:hover{background:var(--surface-2);color:var(--text)}
 .cnt{font-size:12px;color:var(--muted);text-align:right;font-weight:400}
 .cnt.over{color:var(--danger);font-weight:650}
-.aud{display:grid;grid-template-columns:1fr 130px;gap:10px}
-@media (max-width:560px){.aud{grid-template-columns:1fr}}
-.aud-count{font-weight:650;font-size:15px}
 .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(230px,100%),1fr));gap:10px}
 .radio{display:flex;gap:16px;flex-wrap:wrap;font-weight:400}
 .radio label{display:flex;gap:6px;align-items:center;cursor:pointer;color:var(--text-2);font-size:13.5px}
@@ -57,9 +63,11 @@ STYLE = """<style>
 EDITOR_JS = r"""<script>(function(){
 var f=document.getElementById('adform');if(!f)return;
 function $(id){return document.getElementById(id)}
+function on(el,evs,fn){if(el)evs.split(' ').forEach(function(ev){el.addEventListener(ev,fn)})}
+function safe(fn){try{fn()}catch(err){if(window.console)console.error(err)}}
 var ta=$('ad-text'),cnt=$('ad-count'),pvT=$('pv-text'),bt=$('ad-btns'),pvB=$('pv-btns'),btErr=$('ad-btns-err'),
   file=$('ad-file'),pvM=$('pv-media'),rm=$('ad-rm'),send=$('ad-send'),at=$('ad-at');
-var hadMedia=f.dataset.media==='1',origMedia=pvM.innerHTML;
+var hadMedia=f.dataset.media==='1',origMedia=pvM?pvM.innerHTML:'';
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function fmt(s){var h=esc(s);
   h=h.replace(/&lt;(\/?)(b|strong|i|em|u|ins|s|strike|del|code|pre)&gt;/g,'<$1$2>');
@@ -67,48 +75,38 @@ function fmt(s){var h=esc(s);
   h=h.replace(/&lt;tg-spoiler&gt;/g,'<span class=spoiler>').replace(/&lt;\/tg-spoiler&gt;/g,'</span>');
   h=h.replace(/&lt;a href=&quot;((?:https?|tg):\/\/(?:(?!&quot;)\S)+)&quot;&gt;/g,'<a href="$1" target=_blank rel=noopener>').replace(/&lt;\/a&gt;/g,'</a>');
   return h}
-function hasMedia(){return (file.files.length>0)||(hadMedia&&!(rm&&rm.checked))}
-function upd(){var lim=hasMedia()?1024:4096,d=document.createElement('div');d.innerHTML=fmt(ta.value);var n=d.textContent.length;
-  cnt.textContent=n+' / '+lim;cnt.classList.toggle('over',n>lim);
-  pvT.innerHTML=ta.value.trim()?fmt(ta.value):'<span class=muted>Matn shu yerda ko\'rinadi</span>'}
+function hasMedia(){return (file&&file.files.length>0)||(hadMedia&&!(rm&&rm.checked))}
+function upd(){if(!ta||!pvT)return;var v=ta.value;
+  try{pvT.innerHTML=v.trim()?fmt(v):'<span class=muted>Matn shu yerda ko\'rinadi</span>'}catch(err){pvT.textContent=v}
+  safe(function(){var lim=hasMedia()?1024:4096,d=document.createElement('div');d.innerHTML=fmt(v);var n=d.textContent.length;
+    cnt.textContent=n+' / '+lim;cnt.classList.toggle('over',n>lim)})}
+on(ta,'input keyup change paste cut',function(){setTimeout(upd,0)});
+upd();
 var BTN=/^(.+?)\s*[-–—]\s*((?:https?|tg):\/\/\S+)$/i;
 function btns(){var rows=[],bad=0;bt.value.split('\n').forEach(function(line,i){line=line.trim();if(!line)return;
   rows.push(line.split('|').map(function(p){var m=p.trim().match(BTN);if(!m){bad=bad||i+1;return null}return m[1]}))});
   pvB.innerHTML=rows.map(function(r){return '<div class=pv-row>'+r.map(function(t){return t===null?
     '<span class=tg-btn style="color:var(--danger)">xato</span>':'<span class=tg-btn>'+esc(t)+'</span>'}).join('')+'</div>'}).join('');
   btErr.textContent=bad?(bad+'-qatorda xato: «Matn - https://…» ko\'rinishida yozing'):''}
-f.querySelectorAll('[data-wrap]').forEach(function(b){b.addEventListener('click',function(){
+on(bt,'input keyup change paste',function(){setTimeout(function(){safe(btns)},0)});
+safe(btns);
+safe(function(){f.querySelectorAll('[data-wrap]').forEach(function(b){b.addEventListener('click',function(){
   var t=b.dataset.wrap,a=ta.selectionStart,z=ta.selectionEnd,sel=ta.value.slice(a,z),o='<'+t+'>',c='</'+t+'>';
   if(t==='a'){var u=prompt('Havola manzili','https://');if(!u)return;o='<a href="'+u.replace(/"/g,'%22')+'">';c='</a>';if(!sel)sel=u}
-  ta.setRangeText(o+sel+c,a,z,'end');ta.setSelectionRange(a+o.length,a+o.length+sel.length);ta.focus();upd()})});
-file.addEventListener('change',function(){var x=file.files[0];
+  ta.setRangeText(o+sel+c,a,z,'end');ta.setSelectionRange(a+o.length,a+o.length+sel.length);ta.focus();upd()})})});
+on(file,'change',function(){var x=file.files[0];
   if(x&&x.size>11.8*1024*1024){alert('Fayl 12 MB dan katta. Kichikroq fayl tanlang.');file.value='';x=null}
   if(!x){pvM.innerHTML=rm&&rm.checked?'':origMedia}else{var u=URL.createObjectURL(x);
     pvM.innerHTML=x.type.indexOf('image/')===0?'<img src="'+u+'" alt="">':x.type.indexOf('video/')===0?
       '<video src="'+u+'" controls muted playsinline></video>':'<div class=doc>📎 '+esc(x.name)+'</div>'}
   upd()});
-if(rm)rm.addEventListener('change',function(){if(!file.files.length)pvM.innerHTML=rm.checked?'':origMedia;upd()});
-var tb=$('ad-tobot'),aud=$('ad-aud'),days=$('ad-days'),us=$('ad-users'),ac=$('ad-audcount'),unk=$('ad-unknown'),tot=$('ad-total'),timer,lastN=+ac.dataset.n||0;
-function vis(){$('ad-audbox').hidden=!tb.checked;$('ad-daysbox').hidden=aud.value!=='new';
-  $('ad-usersbox').hidden=!tb.checked||aud.value!=='users';ac.hidden=!tb.checked;if(!tb.checked)unk.hidden=true}
-function total(){var n=tb.checked?lastN:0,k=f.querySelectorAll('input[name=t]:checked').length;
-  tot.textContent='Jami: '+n.toLocaleString('ru')+' kishi'+(k?' + '+k+' kanal/guruh':'')}
-function count(){clearTimeout(timer);timer=setTimeout(function(){if(!tb.checked){total();return}
-  var d=new FormData();d.append('audience',aud.value);d.append('days',days.value);d.append('users',us.value);
-  fetch('/api/ads/audience',{method:'POST',body:d,credentials:'same-origin'}).then(function(r){return r.json()}).then(function(j){
-    lastN=j.count;ac.textContent='👥 '+j.count.toLocaleString('ru')+' kishi';
-    if(j.unknown&&j.unknown.length){unk.hidden=false;unk.textContent='Botda topilmadi, ularga yuborilmaydi: '+j.unknown.join(', ')}else{unk.hidden=true}
-    total()}).catch(function(){})},350)}
-[tb,aud,days].forEach(function(el){el.addEventListener('change',function(){vis();count()})});
-us.addEventListener('input',count);days.addEventListener('input',count);
-f.querySelectorAll('input[name=t]').forEach(function(c){c.addEventListener('change',total)});
-function later(){var r=f.querySelector('input[name=when]:checked');return r&&r.value==='later'}
-function when(){at.hidden=!later();at.required=later();send.textContent=later()?'🗓 Rejalashtirish':'🚀 Yuborish'}
+on(rm,'change',function(){if(!file.files.length)pvM.innerHTML=rm.checked?'':origMedia;upd()});
+function later(){var r=f.querySelector('input[name=when]:checked');return !!r&&r.value==='later'}
+function when(){if(!at||!send)return;at.hidden=!later();at.required=later();send.textContent=later()?'🗓 Rejalashtirish':'🚀 Yuborish'}
 f.querySelectorAll('input[name=when]').forEach(function(r){r.addEventListener('change',when)});
-send.addEventListener('click',function(ev){var m=later()?'Reklama belgilangan vaqtda yuborilsinmi?':'Reklama hozir yuborilsinmi? '+tot.textContent;
-  if(!confirm(m))ev.preventDefault()});
-ta.addEventListener('input',upd);bt.addEventListener('input',btns);
-upd();btns();vis();when();total();count();
+safe(when);
+on(send,'click',function(ev){var tot=$('aud-total'),m=later()?'Reklama belgilangan vaqtda yuborilsinmi?':
+  'Reklama hozir yuborilsinmi? '+(tot?tot.textContent:'');if(!confirm(m))ev.preventDefault()});
 })();</script>"""
 
 LIVE_JS = """<script>(function(){var el=document.getElementById('ad-live');
@@ -228,8 +226,6 @@ async def _editor(request: web.Request, ad) -> str:
         kind = ads.MEDIA_KINDS.get(ad["media_type"], "Fayl")
         current = (f'<div class="muted small">Hozirgi: {kind} — {e(ad["media_name"] or "")}</div>'
                    f'<label class=check><input type=checkbox name=remove_media id=ad-rm>Mediani olib tashlash</label>')
-    aud_opts = "".join(f'<option value="{k}"{" selected" if k == ad["audience"] else ""}>{e(v)}</option>'
-                       for k, v in ads.AUDIENCES.items())
     del_opts = '<option value="">O\'chirilmaydi</option>' + "".join(
         f'<option value={h}{" selected" if ad["delete_after"] == h else ""}>{h} soatdan keyin</option>'
         for h in ads.DELETE_HOURS)
@@ -237,20 +233,24 @@ async def _editor(request: web.Request, ad) -> str:
     def chk(name, label):
         return f'<label class=check><input type=checkbox name={name}{" checked" if ad[name] else ""}>{label}</label>'
 
-    unknown_note = e("Botda topilmadi, ularga yuborilmaydi: " + ", ".join(unknown)) if unknown else ""
     at_value = wp._local_input(scheduled) if scheduled else ""
+    # matn bazada Telegram HTML ko'rinishida (&amp; …): muharrirda odatdagi belgilar bilan ko'rsatiladi
+    text_value = e(html.unescape(ad["text"]))
+    audience = wp.audience_block(api="/api/ads/audience", kind=ad["audience"], days=ad["audience_days"],
+                                 users_raw=ad["audience_users"], count=count, unknown=unknown, to_bot=ad["to_bot"])
+    test_button = '<button class="btn primary" name=action value=test>🧪 Menga yuborish</button>'
     form = (
-        f'<form method=post action="/ads/{aid}/save" enctype=multipart/form-data id=adform class=stack '
+        f'<form method=post action="/ads/{aid}/save" enctype=multipart/form-data id=adform class=ad-form '
         f'data-media="{1 if ad["has_media"] else 0}">'
         # Enter bosilganda «Saqlash» ishlashi uchun birinchi (ko'rinmas) tugma
         f'<button name=action value=save class=sr-only tabindex=-1 aria-hidden=true></button>'
-        f'<section class=card><div class=card-h><h2>Kontent</h2></div><div class=stack>'
+        f'<section class="card a-content"><div class=card-h><h2>Kontent</h2></div><div class=stack>'
         f'<label class=field>Nomi <span class=hint>faqat panelda ko\'rinadi</span>'
         f'<input type=text name=title required maxlength=120 value="{e(ad["title"])}"></label>'
         f'<div class=field><div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-end">'
         f'<span>Matn</span><span class=cnt id=ad-count></span></div><div class=tb>{tools}</div>'
-        f'<textarea name=text id=ad-text rows=8 maxlength=8000 aria-label="Reklama matni" '
-        f'placeholder="Reklama matni. Belgilab, yuqoridagi tugmalar bilan formatlang.">{e(ad["text"])}</textarea></div>'
+        f'<textarea name=text id=ad-text rows=14 maxlength=8000 aria-label="Reklama matni" '
+        f'placeholder="Reklama matni. Belgilab, yuqoridagi tugmalar bilan formatlang.">{text_value}</textarea></div>'
         f'<div class=field>Media <span class=hint>rasm, video, GIF yoki fayl — 12 MB gacha</span>{current}'
         f'<input type=file name=media id=ad-file></div>'
         f'<label class=field>Tugmalar <span class=hint>har qator alohida; bir qatorda bir nechta tugma — «|» bilan</span>'
@@ -258,34 +258,25 @@ async def _editor(request: web.Request, ad) -> str:
         f'Kanal - https://t.me/kanal | Sayt - https://site.uz">{e(ad["buttons"])}</textarea>'
         f'<span class=hint id=ad-btns-err style="color:var(--danger)"></span></label></div></section>'
 
-        f'<section class=card><div class=card-h><h2>Kimga</h2><span class="muted small" id=ad-total></span></div>'
-        f'<div class=stack><label class=check><input type=checkbox name=to_bot id=ad-tobot'
-        f'{" checked" if ad["to_bot"] else ""}>🤖 Bot foydalanuvchilari</label>'
-        f'<div class=aud id=ad-audbox><label class=field>Auditoriya<select name=audience id=ad-aud>{aud_opts}</select>'
-        f'</label><label class=field id=ad-daysbox>Necha kun<input type=number name=audience_days id=ad-days min=1 '
-        f'max=365 value={ad["audience_days"]}></label></div>'
-        f'<label class=field id=ad-usersbox>Aniq akkauntlar <span class=hint>har qatorda Telegram ID yoki @username; '
-        f'faqat botga /start bosganlarga yuborish mumkin</span><textarea name=audience_users id=ad-users rows=3 '
-        f'maxlength=5000 placeholder="123456789&#10;@username">{e(ad["audience_users"])}</textarea></label>'
-        f'<div class=aud-count id=ad-audcount data-n={count}>👥 {num(count)} kishi</div>'
-        f'<div class="alert warn" id=ad-unknown{"" if unknown else " hidden"}>{unknown_note}</div>'
+        f'<section class="card a-who"><div class=card-h><h2>Kimga</h2><span class="muted small" id=aud-total></span>'
+        f'</div><div class=stack>{audience}'
         f'<div><div class="muted small" style="margin-bottom:2px">Kanal va guruhlar</div>'
         f'{wp.target_checks(items, ad["targets"])}</div></div></section>'
 
-        f'<section class=card><div class=card-h><h2>Sozlamalar</h2></div><div class=stack><div class=opts>'
+        f'<section class="card a-set"><div class=card-h><h2>Sozlamalar</h2></div><div class=stack><div class=opts>'
         + chk("silent", "🔕 Ovozsiz yuborish") + chk("no_preview", "🔗 Havola ko'rinishini o'chirish")
         + chk("protect", "🛡 Nusxalash va forwardni taqiqlash") + chk("pin", "📌 Chat tepasiga qadash")
         + f'</div><label class=field style="max-width:260px">Avto-o\'chirish<select name=delete_after>{del_opts}'
         f'</select></label><div class=field>Yuborish vaqti <span class=hint>Toshkent vaqti</span><div class=radio>'
         f'<label><input type=radio name=when value=now{"" if scheduled else " checked"}>Hozir</label>'
         f'<label><input type=radio name=when value=later{" checked" if scheduled else ""}>Rejalashtirish</label></div>'
-        f'<input type=datetime-local name=scheduled_at id=ad-at value="{at_value}"></div>'
-        f'<div class=field>Sinov <span class=hint>o\'zingizning Telegram ID yoki @username — botga /start bosgan '
-        f'bo\'lishi kerak</span><div class=tgt-form><input type=text name=test_chat maxlength=64 '
-        f'value="{e(test_chat)}" placeholder="123456789 yoki @username" aria-label="Sinov akkaunti">'
-        f'<button class="btn outline" name=action value=test>🧪 Menga sinov</button></div></div></div></section>'
+        f'<input type=datetime-local name=scheduled_at id=ad-at value="{at_value}"></div></div></section>'
 
-        f'<div class=actions><button class="btn outline" name=action value=save>Saqlash</button>'
+        f'<section class="card a-test"><div class=card-h><h2>🧪 Sinov uchun yuborish</h2>'
+        f'<span class="muted small">avval saqlanadi, keyin yuboriladi</span></div><div class=stack>'
+        f'{wp.test_box(test_chat, test_button)}</div></section>'
+
+        f'<div class="actions a-act"><button class="btn outline" name=action value=save>Saqlash</button>'
         f'<button class="btn primary" name=action value=send id=ad-send>🚀 Yuborish</button></div></form>'
     )
     extra = []
@@ -300,9 +291,9 @@ async def _editor(request: web.Request, ad) -> str:
     head = (f'<a class=back href="/ads">{icon("back")}Reklama</a><div class=ph><div><div class=ph-title>'
             f'<h1>{e(ad["title"])}</h1>{_pill(ad["status"], aid)}</div><div class=ph-meta>'
             f'{"".join(f"<span>{m}</span>" for m in meta)}</div></div><div class=actions>{"".join(extra)}</div></div>')
-    manage = f'<section class=card>{wp.target_manage(items, f"/ads/{aid}")}</section>'
-    return (f'{wp.STYLE}{STYLE}<div class=ad>{head}<div class=split><div class=stack>{form}{manage}</div>'
-            f'<div>{_preview(ad)}</div></div></div>{EDITOR_JS}')
+    manage = f'<section class="card a-manage">{wp.target_manage(items, f"/ads/{aid}")}</section>'
+    return (f'{wp.STYLE}{STYLE}<div class=ad>{head}<div class=ad-grid>{form}{manage}'
+            f'<div class=a-pv>{_preview(ad)}</div></div></div>{wp.AUDIENCE_JS}{EDITOR_JS}')
 
 
 async def _live_html(ad) -> str:

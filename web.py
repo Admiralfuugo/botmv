@@ -360,6 +360,17 @@ select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--
 .inline-form input{height:30px;font-size:13px;width:170px}
 .nav{min-width:0;overflow-x:auto;scrollbar-width:none} .nav::-webkit-scrollbar{display:none}
 @media (min-width:721px) and (max-width:1180px){.nav a{padding:7px 9px;gap:6px}}
+/* orqa fon: harakatlanuvchi bog'langan nuqtalar (canvas#bg) va burchaklardagi yengil nur */
+:root{--dot:42,120,214;--glow:rgba(42,120,214,.10)}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--dot:85,152,231;--glow:rgba(57,135,229,.14)}}
+:root[data-theme=dark]{--dot:85,152,231;--glow:rgba(57,135,229,.14)}
+body{background:radial-gradient(1200px 600px at 10% -10%,var(--glow),transparent 60%),
+  radial-gradient(900px 500px at 110% 10%,var(--glow),transparent 60%),var(--bg);background-attachment:fixed}
+#bg{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none}
+main{position:relative;z-index:1}
+.corner{z-index:5}
+.login-card{background:color-mix(in srgb,var(--surface) 78%,transparent);
+  backdrop-filter:blur(12px) saturate(1.3);-webkit-backdrop-filter:blur(12px) saturate(1.3)}
 """
 
 THEME_JS = "try{var t=localStorage.getItem('theme');if(t)document.documentElement.dataset.theme=t}catch(e){}"
@@ -409,10 +420,12 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
     ad_testfail:"Sinov xabarini yuborib bo'lmadi",ad_scheduled:"Reklama rejalashtirildi",ad_started:"Yuborish boshlandi",
     ad_paused:"Pauza qilindi",ad_resumed:"Davom ettirildi",ad_stopped:"Yuborish to'xtatildi",
     ad_deleting:"Xabarlar chatlardan o'chirilmoqda",ad_copied:"Nusxa olindi — yangi qoralama",
-    ad_removed:"Reklama o'chirildi",ad_unscheduled:"Rejalashtirish bekor qilindi"};
+    ad_removed:"Reklama o'chirildi",ad_unscheduled:"Rejalashtirish bekor qilindi",
+    pr_testsent:"Sinov posti yuborildi",pr_testfail:"Sinov postini yuborib bo'lmadi",
+    pr_nousers:"Tanlangan auditoriyada postni hali olmagan odam yo'q"};
   var ERR={badtg:1,badurl:1,needlink:1,notitle:1,exists:1,baduser:1,shortpw:1,mismatch:1,badpw:1,lastsuper:1,self:1,forbidden:1,
     pr_nowhere:1,pr_running:1,pr_notended:1,pr_nobody:1,pr_tgerr:1,pr_blocked:1,pr_senderr:1,pr_notext:1,pr_closed:1,
-    tg_bad:1,tg_missing:1,tg_noadmin:1,ad_locked:1,ad_badbtn:1,ad_toolong:1,ad_empty:1,ad_noone:1,ad_testbad:1,ad_testfail:1};
+    tg_bad:1,tg_missing:1,tg_noadmin:1,ad_locked:1,ad_badbtn:1,ad_toolong:1,ad_empty:1,ad_noone:1,ad_testbad:1,ad_testfail:1,pr_testfail:1,pr_nousers:1};
   var u=new URL(location.href),m=u.searchParams.get('m');
   if(m&&MSG[m]){var t=document.getElementById('toast');t.textContent=MSG[m];t.classList.toggle('err',!!ERR[m]);
     requestAnimationFrame(function(){t.classList.add('show')});setTimeout(function(){t.classList.remove('show')},2800);
@@ -440,6 +453,44 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
     ks.addEventListener('change',upd);upd();
   }
 })();
+"""
+
+
+# orqa fon animatsiyasi: nuqtalar suzadi, yaqinlari chiziq bilan tutashadi, sichqoncha ularni yumshoq tortadi
+BG_JS = r"""
+(function(){var c=document.getElementById('bg');if(!c||!c.getContext)return;
+var ctx=c.getContext('2d'),root=document.documentElement,reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+var LINK=140,MR=190,w=0,h=0,pts=[],m={x:-9999,y:-9999,on:false},rgb='42,120,214',tick=0;
+function col(){return getComputedStyle(root).getPropertyValue('--dot').trim()||'42,120,214'}
+function size(){var dpr=Math.min(window.devicePixelRatio||1,2);w=innerWidth;h=innerHeight;
+  c.width=w*dpr;c.height=h*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);
+  var n=Math.round(Math.min(200,Math.max(50,w*h/7000)));if(pts.length>n)pts.length=n;
+  while(pts.length<n)pts.push({x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*.45,vy:(Math.random()-.5)*.45,r:Math.random()*1.6+1.1});
+  pts.forEach(function(p){p.x=Math.min(p.x,w);p.y=Math.min(p.y,h)});rgb=col()}
+function step(){for(var i=0;i<pts.length;i++){var p=pts[i],dx=m.x-p.x,dy=m.y-p.y,d=Math.sqrt(dx*dx+dy*dy);
+  if(m.on&&d<MR&&d>1){var f=(1-d/MR)*.06;p.vx+=dx/d*f;p.vy+=dy/d*f}
+  p.vx*=.985;p.vy*=.985;var s=Math.sqrt(p.vx*p.vx+p.vy*p.vy);
+  if(s<.15){p.vx+=(Math.random()-.5)*.05;p.vy+=(Math.random()-.5)*.05}
+  if(s>2.2){p.vx*=2.2/s;p.vy*=2.2/s}
+  p.x+=p.vx;p.y+=p.vy;if(p.x<0||p.x>w)p.vx*=-1;if(p.y<0||p.y>h)p.vy*=-1;
+  p.x=Math.max(0,Math.min(w,p.x));p.y=Math.max(0,Math.min(h,p.y))}}
+function draw(){ctx.clearRect(0,0,w,h);ctx.lineWidth=1;
+  for(var i=0;i<pts.length;i++){var a=pts[i];
+    for(var j=i+1;j<pts.length;j++){var b=pts[j],dx=a.x-b.x,dy=a.y-b.y;
+      if(dx>LINK||dx<-LINK||dy>LINK||dy<-LINK)continue;var d=Math.sqrt(dx*dx+dy*dy);
+      if(d<LINK){ctx.strokeStyle='rgba('+rgb+','+((1-d/LINK)*.35).toFixed(3)+')';
+        ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke()}}
+    if(m.on){var dm=Math.sqrt((a.x-m.x)*(a.x-m.x)+(a.y-m.y)*(a.y-m.y));
+      if(dm<MR){ctx.strokeStyle='rgba('+rgb+','+((1-dm/MR)*.6).toFixed(3)+')';ctx.lineWidth=1.2;
+        ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(m.x,m.y);ctx.stroke();ctx.lineWidth=1}}
+    ctx.fillStyle='rgba('+rgb+',.75)';ctx.beginPath();ctx.arc(a.x,a.y,a.r,0,6.2832);ctx.fill()}}
+function frame(){if(++tick%30===0)rgb=col();step();draw();if(!reduce)requestAnimationFrame(frame)}
+addEventListener('resize',function(){size();if(reduce)draw()});
+addEventListener('pointermove',function(e){m.x=e.clientX;m.y=e.clientY;m.on=true});
+document.addEventListener('mouseleave',function(){m.on=false;m.x=m.y=-9999});
+addEventListener('blur',function(){m.on=false;m.x=m.y=-9999});
+new MutationObserver(function(){rgb=col();if(reduce)draw()}).observe(root,{attributes:true,attributeFilter:['data-theme']});
+size();frame();})();
 """
 
 
@@ -479,9 +530,9 @@ def page(body: str, *, title: str = "Admin", active: str = "", status: int = 200
         text=f"<!doctype html><html lang=uz><head><meta charset=utf-8>"
              f"<meta name=viewport content='width=device-width,initial-scale=1'>"
              f"<title>{e(title)} · Ovoz berish</title><script>{THEME_JS}</script>"
-             f"<style>{STYLE}</style></head><body>{top}{main}"
+             f"<style>{STYLE}</style></head><body><canvas id=bg aria-hidden=true></canvas>{top}{main}"
              f"<div id=tip role=tooltip></div><div id=toast role=status aria-live=polite></div>"
-             f"<script>{APP_JS}</script></body></html>",
+             f"<script>{APP_JS}</script><script>{BG_JS}</script></body></html>",
         content_type="text/html", status=status,
     )
 

@@ -3,6 +3,7 @@
 web.py dagi make_app() oxirida setup(app) chaqiriladi; sahifa uslubi va yordamchilar web.py dan olinadi.
 """
 import asyncio
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -12,7 +13,7 @@ from aiohttp import web
 import db
 import web as panel
 from config import RESULTS_CHANNEL
-from services import channels, premium, targets
+from services import ads, channels, premium, targets
 
 e, icon, num, dt = panel.e, panel.icon, panel.num, panel.dt
 
@@ -47,6 +48,14 @@ STYLE = """<style>
 .tgt-form{display:flex;gap:8px;flex-wrap:wrap}
 .tgt-form input[type=text]{flex:1;min-width:180px}
 .alert.good{background:var(--good-soft);color:var(--good)}
+.gw [hidden],.ad [hidden]{display:none!important}
+.aud{display:grid;grid-template-columns:1fr 130px;gap:10px}
+@media (max-width:560px){.aud{grid-template-columns:1fr}}
+.aud-count{font-weight:650;font-size:15px}
+.test-row{display:flex;gap:8px;flex-wrap:wrap}
+.test-row input[type=text]{flex:1;min-width:min(240px,100%);height:44px;font-size:15px}
+.test-row .btn{height:44px;padding:0 18px}
+.gw .bubble{font-size:14.5px}
 </style>"""
 
 # --- joylash joylari: Premium va Reklama sahifalari birga ishlatadi ---
@@ -77,6 +86,56 @@ def target_checks(items: list[dict], checked=(), posted=(), name: str = "t") -> 
     return "<div>" + "".join(out) + "</div>"
 
 
+def audience_block(*, api: str, kind: str = "all", days: int = 7, users_raw: str = "", count: int = 0,
+                   unknown=(), to_bot: bool = True, note: str = "") -> str:
+    """«Kimga»: bot foydalanuvchilari va auditoriya (Premium va Reklama birga ishlatadi). Soni api dan olinadi."""
+    opts = "".join(f'<option value="{k}"{" selected" if k == kind else ""}>{e(v)}</option>'
+                   for k, v in ads.AUDIENCES.items())
+    unknown_note = e("Botda topilmadi, ularga yuborilmaydi: " + ", ".join(unknown)) if unknown else ""
+    return (
+        f'<div class=stack id=aud data-api="{e(api)}">'
+        f'<label class=check><input type=checkbox name=to_bot id=aud-tobot{" checked" if to_bot else ""}>'
+        f'🤖 Bot foydalanuvchilari{note}</label>'
+        f'<div class=aud id=aud-box><label class=field>Auditoriya<select name=audience id=aud-kind>{opts}</select>'
+        f'</label><label class=field id=aud-daysbox>Necha kun<input type=number name=audience_days id=aud-days '
+        f'min=1 max=365 value={int(days)}></label></div>'
+        f'<label class=field id=aud-usersbox>Aniq akkauntlar <span class=hint>har qatorda Telegram ID yoki @username; '
+        f'faqat botga /start bosganlarga yuborish mumkin</span><textarea name=audience_users id=aud-users rows=3 '
+        f'maxlength=5000 placeholder="123456789&#10;@username">{e(users_raw)}</textarea></label>'
+        f'<div class=aud-count id=aud-count data-n={int(count)}>👥 {num(count)} kishi</div>'
+        f'<div class="alert warn" id=aud-unknown{"" if unknown else " hidden"}>{unknown_note}</div></div>'
+    )
+
+
+AUDIENCE_JS = r"""<script>(function(){var box=document.getElementById('aud');if(!box)return;
+function $(i){return document.getElementById(i)}
+var tb=$('aud-tobot'),kind=$('aud-kind'),days=$('aud-days'),us=$('aud-users'),ac=$('aud-count'),unk=$('aud-unknown'),
+  tot=$('aud-total'),form=box.closest('form')||document,timer,n=+ac.dataset.n||0;
+function vis(){$('aud-box').hidden=!tb.checked;$('aud-daysbox').hidden=kind.value!=='new';
+  $('aud-usersbox').hidden=!tb.checked||kind.value!=='users';ac.hidden=!tb.checked;if(!tb.checked)unk.hidden=true}
+function total(){if(!tot)return;var k=form.querySelectorAll('input[name=t]:checked').length,m=tb.checked?n:0;
+  tot.textContent='Jami: '+m.toLocaleString('ru')+' kishi'+(k?' + '+k+' kanal/guruh':'')}
+function count(){clearTimeout(timer);timer=setTimeout(function(){if(!tb.checked){total();return}
+  var d=new FormData();d.append('audience',kind.value);d.append('days',days.value);d.append('users',us.value);
+  fetch(box.dataset.api,{method:'POST',body:d,credentials:'same-origin'}).then(function(r){return r.json()}).then(function(j){
+    n=j.count;ac.textContent='👥 '+n.toLocaleString('ru')+' kishi';
+    if(j.unknown&&j.unknown.length){unk.hidden=false;unk.textContent='Botda topilmadi, ularga yuborilmaydi: '+j.unknown.join(', ')}
+    else{unk.hidden=true}total()}).catch(function(){})},350)}
+[tb,kind,days].forEach(function(el){el.addEventListener('change',function(){vis();count()})});
+us.addEventListener('input',count);days.addEventListener('input',count);
+form.querySelectorAll('input[name=t]').forEach(function(c){c.addEventListener('change',total)});
+vis();total();})();</script>"""
+
+
+def test_box(value: str, button: str = "", note: str = "") -> str:
+    """Sinov uchun akkaunt maydoni va tugmasi (formaning ichida yoki alohida)."""
+    button = button or '<button class="btn primary">🧪 Menga yuborish</button>'
+    return (f'<p class="muted small" style="margin:0">O\'zingizning Telegram ID yoki @username kiriting. U akkaunt botga '
+            f'/start bosgan bo\'lishi kerak. Sinov statistikaga kirmaydi.{note}</p>'
+            f'<div class=test-row><input type=text name=test_chat maxlength=64 value="{e(value)}" '
+            f'placeholder="123456789 yoki @username" aria-label="Sinov akkaunti">{button}</div>')
+
+
 def target_manage(items: list[dict], back: str) -> str:
     """«Joy qo'shish»: qo'lda qo'shilgan kanal/guruhlar ro'yxati va qo'shish formasi."""
     rows = "".join(
@@ -100,6 +159,16 @@ if(!el||el.dataset.running!=='1')return;
 var t=setInterval(function(){fetch('/api/premium/progress?g='+el.dataset.g,{credentials:'same-origin'})
 .then(function(r){return r.json()}).then(function(d){el.innerHTML=d.html;if(!d.running)clearInterval(t)})
 .catch(function(){})},3000)})();</script>"""
+
+
+# post matni yozilayotganda «Telegramda ko'rinishi» darhol yangilanadi
+PREVIEW_JS = r"""<script>(function(){var d=document.getElementById('gw-desc'),pt=document.getElementById('gw-pv-text');
+if(!d||!pt)return;var t=document.getElementById('gw-title'),b=document.getElementById('gw-btn'),pb=document.getElementById('gw-pv-btn');
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function upd(){var v=d.value.trim();pt.innerHTML=v?esc(v):'🎁 <b>'+esc(t.value.trim())+'</b>';
+  if(pb)pb.textContent=b.value.trim()||'🚀 Boshlash'}
+[d,t,b].forEach(function(el){if(el)['input','keyup','change','paste'].forEach(function(ev){
+  el.addEventListener(ev,function(){setTimeout(upd,0)})})});})();</script>"""
 
 
 def _to(path: str, m: str):
@@ -149,18 +218,23 @@ def _fields(g=None) -> str:
                f'<label class="check full"><input type=checkbox name=remove_image>Rasmni o\'chirish '
                f'<span class=muted>— allaqachon yuborilgan postlarda rasm qoladi, faqat matni yangilanadi</span></label>')
     img_label = "Rasmni almashtirish" if has_img else "Rasm"
+
+    def idx(name: str) -> str:  # id faqat tahrirlash formasida (yangi konkurs formasi ham shu sahifada)
+        return f" id={name}" if g else ""
+
     return (
         f'<label class=field>Sarlavha <span class=hint>panelda ko\'rinadi; post matni bo\'sh bo\'lsa postda ham</span>'
-        f'<input type=text name=title required maxlength=200 value="{e(title)}" '
+        f'<input type=text name=title{idx("gw-title")} required maxlength=200 value="{e(title)}" '
         f'placeholder="Masalan: Telegram Premium konkursi"></label>'
         f'<label class=field>Tugash vaqti <span class=hint>Toshkent vaqti</span>'
         f'<input type=datetime-local name=ends_at required value="{ends}"></label>'
         f'<label class="field full">Post matni <span class=hint>rasm bo\'lsa — 1024 belgigacha</span>'
-        f'<textarea name=description rows=7 maxlength={1024 if has_img else 3500} '
+        f'<textarea name=description{idx("gw-desc")} rows=9 maxlength={1024 if has_img else 3500} '
         f'placeholder="Telegram Premium yutib oling! Shartlar: ...">{e(desc)}</textarea></label>{img}'
         f'<label class=field>{img_label} <span class=hint>JPG, PNG yoki WEBP, 10 MB gacha</span>'
         f'<input type=file name=image accept="image/jpeg,image/png,image/webp"></label>'
-        f'<label class=field>Tugma matni<input type=text name=button_text maxlength=40 value="{e(button)}"></label>'
+        f'<label class=field>Tugma matni<input type=text name=button_text{idx("gw-btn")} maxlength=40 '
+        f'value="{e(button)}"></label>'
     )
 
 
@@ -198,19 +272,19 @@ def _result_html(gid: int) -> str:
 
 async def _publish_card(bot, g) -> str:
     gid = g["id"]
-    unsent = await db.gw_unsent_count(gid)
+    unsent = await db.gw_audience_unsent_count(gid, "all")
     items = await targets.available(bot)
     posted = [c for c, _ in await premium.posts(g)]
     # birinchi joylashda natijalar kanali oldindan belgilanadi
     checked = [] if posted else [RESULTS_CHANNEL]
     running = 1 if premium.sending(gid) else 0
     confirm = e("Post tanlangan joylarga yuborilsinmi? Avval joylangan joyga yana bitta yangi post chiqadi.")
+    audience = audience_block(api=f"/api/premium/audience?g={gid}", count=unsent, to_bot=bool(unsent),
+                              note=" <span class=muted>— avval olganlarga qayta yuborilmaydi</span>")
     return (
-        f'<section class=card><div class=card-h><h2>Joylash</h2>'
-        f'<span class="muted small">qayerga yuborishni tanlang</span></div>'
-        f'<form method=post action="/premium/{gid}/publish" class=stack data-confirm="{confirm}">'
-        f'<label class=check><input type=checkbox name=bot{" checked" if unsent else ""}>'
-        f'🤖 Bot foydalanuvchilari <span class=muted>— yangi {num(unsent)} kishiga</span></label>'
+        f'<section class=card><div class=card-h><h2>Kimga joylash</h2>'
+        f'<span class="muted small" id=aud-total></span></div>'
+        f'<form method=post action="/premium/{gid}/publish" class=stack data-confirm="{confirm}">{audience}'
         f'<div><div class="muted small" style="margin-bottom:2px">Kanal va guruhlar</div>'
         f'{target_checks(items, checked, posted)}</div>'
         f'<div><button class="btn primary">{icon("send")}Joylash</button></div></form>'
@@ -221,11 +295,19 @@ async def _publish_card(bot, g) -> str:
     )
 
 
+def _test_card(gid: int, value: str) -> str:
+    return (f'<section class=card><div class=card-h><h2>🧪 Sinov uchun yuborish</h2>'
+            f'<span class="muted small">saqlangan post botdagi ko\'rinishda keladi</span></div>'
+            f'<form method=post action="/premium/{gid}/test" class=stack>'
+            f'{test_box(value, note=" «🚀 Boshlash»ni bosib, konkursni o‘zingiz sinab ko‘rishingiz mumkin.")}'
+            f'</form></section>')
+
+
 async def _preview(g) -> str:
     img = f'<img src="/premium/image/{g["id"]}-{g["image_ver"]}.jpg" alt="">' if g["has_image"] else ""
     button = e(g["button_text"] or premium.DEFAULT_BUTTON)
-    post = (f'<div class=preview><div class=bubble>{img}{premium.post_text(g)}</div>'
-            f'<span class=tg-btn>{button}</span></div>')
+    post = (f'<div class=preview><div class=bubble>{img}<span id=gw-pv-text>{premium.post_text(g)}</span></div>'
+            f'<span class=tg-btn id=gw-pv-btn>{button}</span></div>')
     btns = "".join(f'<span class=tg-btn>{channels.emoji(k)} {e(t)}</span>' for _, k, t, *_ in await channels.active())
     invite = (f'<div class=preview><div class=bubble>{premium.INVITE_TEXT}</div>{btns}'
               f'<span class=tg-btn>✅ Tasdiqlash</span></div>')
@@ -394,15 +476,17 @@ async def _view(request: web.Request, g) -> str:
                      f'<span class="muted small">saqlansa kanal va botdagi nusxalar ham yangilanadi</span></div>'
                      f'<form method=post action="/premium/{gid}/save" enctype=multipart/form-data class=gw-form>'
                      f'{_fields(g)}<div class=full><button class="btn primary">Saqlash</button></div></form></section>')
-        main = (f'<div class="split section"><div class=stack>{post_card}{await _publish_card(bot, g)}</div>'
-                f'<div class=stack>{await _preview(g)}</div></div>')
+        test_chat = await db.get_setting(f"ads_test:{request['admin'][0]}") or ""
+        main = (f'<div class="split section"><div class=stack>{post_card}{await _publish_card(bot, g)}'
+                f'{_test_card(gid, test_chat)}</div><div class=stack>{await _preview(g)}</div></div>')
     else:
         main = f'<div class=section>{await _preview(g)}</div>'
 
     new = (f'<details class="card section" id=new><summary>{icon("plus")}Yangi konkurs{icon("chev", "chev")}'
            f'</summary>{_new_form(bool(await db.gw_active()))}</details>')
     return (STYLE + '<div class=gw>' + head + tiles + winners + main
-            + await _participants(request, g, stats) + await _history(gid) + new + '</div>' + PROGRESS_JS)
+            + await _participants(request, g, stats) + await _history(gid) + new + '</div>'
+            + PROGRESS_JS + PREVIEW_JS + AUDIENCE_JS)
 
 
 # --- sahifalar ---
@@ -489,15 +573,65 @@ async def gw_publish(request: web.Request):
     bot = request.app["bot"]
     items = await targets.available(bot)
     dest = targets.pick(items, data.getall("t", []))
-    to_bot = bool(data.get("bot"))
+    to_bot = bool(data.get("to_bot"))
     if not (dest or to_bot):
         _to(back, "pr_nowhere")
+    users = []
+    if to_bot:
+        kind, days, ids = await _audience_args(data)
+        users = await db.gw_audience_unsent(gid, kind, days, ids)
+        if not users and not dest:
+            _to(back, "pr_nousers")
     if dest:
         titles = {i["chat_id"]: i["title"] for i in items}
         _last_result[gid] = [(titles.get(c, c), err) for c, err in await premium.publish_to(bot, gid, dest)]
-    if to_bot and not await premium.broadcast(bot, gid):
+    if users and not await premium.broadcast(bot, gid, users):
         _to(back, "pr_running")
     _to(back, "pr_published")
+
+
+async def _audience_args(data):
+    """Formadagi auditoriya: (turi, N kun, aniq akkauntlar ID lari)."""
+    kind = data.get("audience") if data.get("audience") in ads.AUDIENCES else "all"
+    try:
+        days = max(1, min(365, int(data.get("audience_days") or data.get("days") or 7)))
+    except ValueError:
+        days = 7
+    ids = []
+    if kind == "users":
+        ids, _ = await ads.resolve_accounts((data.get("audience_users") or data.get("users") or "")[:5000])
+    return kind, days, ids
+
+
+async def gw_test(request: web.Request):
+    gid, g, back = await _editable(request)
+    data = await request.post()
+    chat = (data.get("test_chat") or "").strip()[:64]
+    await db.set_setting(f"ads_test:{request['admin'][0]}", chat)
+    found, _ = await ads.resolve_accounts(chat)
+    if not found:
+        _to(back, "ad_testbad")
+    try:
+        await premium.send_post(request.app["bot"], found[0], g, record=False)
+        ok = True
+    except Exception as ex:
+        logging.warning("premium sinov %s: %s", found[0], ex)
+        ok = False
+    _to(back, "pr_testsent" if ok else "pr_testfail")
+
+
+async def api_audience(request: web.Request):
+    try:
+        gid = int(request.query.get("g", ""))
+    except ValueError:
+        raise web.HTTPBadRequest()
+    data = await request.post()
+    kind, days, ids = await _audience_args(data)
+    unknown = []
+    if kind == "users":
+        _, unknown = await ads.resolve_accounts((data.get("users") or "")[:5000])
+    count = await db.gw_audience_unsent_count(gid, kind, days, ids)
+    return web.json_response({"count": count, "unknown": unknown[:20]})
 
 
 def _safe_back(value) -> str:
@@ -599,6 +733,8 @@ def setup(app: web.Application):
         web.get(r"/premium/{id:\d+}/export.csv", gw_export),
         web.get(r"/premium/image/{id:\d+}-{ver:\d+}.jpg", gw_image),
         web.get("/api/premium/progress", api_progress),
+        web.post(r"/premium/{id:\d+}/test", gw_test),
+        web.post("/api/premium/audience", api_audience),
         web.post("/targets/add", target_add),
         web.post(r"/targets/{id:\d+}/delete", target_delete),
     ])
