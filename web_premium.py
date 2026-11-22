@@ -56,6 +56,16 @@ STYLE = """<style>
 .test-row input[type=text]{flex:1;min-width:min(240px,100%);height:44px;font-size:15px}
 .test-row .btn{height:44px;padding:0 18px}
 .gw .bubble{font-size:14.5px}
+.gw-grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:16px;align-items:start;
+  grid-template-areas:"post pv" "pub pv" "test pv"}
+.g-post{grid-area:post}.g-pub{grid-area:pub}.g-test{grid-area:test}
+.g-pv{grid-area:pv;align-self:stretch;min-width:0}
+.gw-pv{position:sticky;top:76px}
+@media (max-width:900px){.gw-grid{grid-template-columns:minmax(0,1fr);grid-template-areas:"post" "pv" "pub" "test"}
+  .gw-pv{position:static}}
+#publish,#test,#new{scroll-margin-top:76px}
+.steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;color:var(--text-2)}
+.steps b{color:var(--text)}
 </style>"""
 
 # --- joylash joylari: Premium va Reklama sahifalari birga ishlatadi ---
@@ -238,11 +248,13 @@ def _fields(g=None) -> str:
     )
 
 
-def _new_form(has_active: bool) -> str:
-    warn = ('<div class="alert warn full">Hozirgi faol konkurs yopiladi. Eski postdagi «Boshlash» tugmasi '
-            'yangi konkursga olib boradi.</div>') if has_active else ""
-    return (f'<form method=post action=/premium/new enctype=multipart/form-data class=gw-form>{_fields()}{warn}'
-            f'<div class=full><button class="btn primary">{icon("plus")}Konkurs yaratish</button></div></form>')
+def _new_card(has_active: bool) -> str:
+    note = ("Qoralama sifatida ochiladi: hozirgi konkurs yangisi faollashtirilguncha davom etadi."
+            if has_active else "Qoralama sifatida ochiladi: avval post tayyorlanadi va sinab ko'riladi.")
+    return (f'<section class="card section" id=new><div class=card-h><h2>Yangi konkurs</h2></div>'
+            f'<div class=stack><p class="muted small" style="margin:0">{note}</p>'
+            f'<form method=post action=/premium/new><button class="btn outline">{icon("plus")}Yangi konkurs yaratish'
+            f'</button></form></div></section>')
 
 
 # --- sahifa bloklari ---
@@ -270,24 +282,31 @@ def _result_html(gid: int) -> str:
     return html_ + "</div>"
 
 
-async def _publish_card(bot, g) -> str:
-    gid = g["id"]
+async def _publish_card(bot, g, other_active: bool) -> str:
+    gid, draft = g["id"], g["is_draft"]
     unsent = await db.gw_audience_unsent_count(gid, "all")
     items = await targets.available(bot)
     posted = [c for c, _ in await premium.posts(g)]
     # birinchi joylashda natijalar kanali oldindan belgilanadi
     checked = [] if posted else [RESULTS_CHANNEL]
     running = 1 if premium.sending(gid) else 0
-    confirm = e("Post tanlangan joylarga yuborilsinmi? Avval joylangan joyga yana bitta yangi post chiqadi.")
+    if draft:
+        confirm = ("Konkurs faollashtiriladi va botda ishtirok etish ochiladi"
+                   + (" (hozirgi faol konkurs yopiladi)" if other_active else "")
+                   + ". Post tanlangan joylarga yuborilsinmi?")
+        label = "🚀 Faollashtirish va joylash"
+    else:
+        confirm = "Post tanlangan joylarga yuborilsinmi? Avval joylangan joyga yana bitta yangi post chiqadi."
+        label = "🚀 Joylash"
     audience = audience_block(api=f"/api/premium/audience?g={gid}", count=unsent, to_bot=bool(unsent),
                               note=" <span class=muted>— avval olganlarga qayta yuborilmaydi</span>")
     return (
-        f'<section class=card><div class=card-h><h2>Kimga joylash</h2>'
+        f'<section class="card g-pub" id=publish><div class=card-h><h2>📢 Kimga joylash</h2>'
         f'<span class="muted small" id=aud-total></span></div>'
-        f'<form method=post action="/premium/{gid}/publish" class=stack data-confirm="{confirm}">{audience}'
+        f'<form method=post action="/premium/{gid}/publish" class=stack data-confirm="{e(confirm)}">{audience}'
         f'<div><div class="muted small" style="margin-bottom:2px">Kanal va guruhlar</div>'
         f'{target_checks(items, checked, posted)}</div>'
-        f'<div><button class="btn primary">{icon("send")}Joylash</button></div></form>'
+        f'<div><button class="btn primary">{label}</button></div></form>'
         f'{_result_html(gid)}'
         f'<div id=pr-progress class="muted small" style="margin-top:14px" data-g="{gid}" data-running="{running}">'
         f'{await _progress_html(gid)}</div>'
@@ -295,12 +314,12 @@ async def _publish_card(bot, g) -> str:
     )
 
 
-def _test_card(gid: int, value: str) -> str:
-    return (f'<section class=card><div class=card-h><h2>🧪 Sinov uchun yuborish</h2>'
+def _test_card(g, value: str) -> str:
+    note = (" Qoralamada «🚀 Boshlash» tugmasi konkurs faollashgandan keyin ishlaydi." if g["is_draft"]
+            else " «🚀 Boshlash»ni bosib, konkursni o‘zingiz sinab ko‘rishingiz mumkin.")
+    return (f'<section class="card g-test" id=test><div class=card-h><h2>🧪 Sinov uchun yuborish</h2>'
             f'<span class="muted small">saqlangan post botdagi ko\'rinishda keladi</span></div>'
-            f'<form method=post action="/premium/{gid}/test" class=stack>'
-            f'{test_box(value, note=" «🚀 Boshlash»ni bosib, konkursni o‘zingiz sinab ko‘rishingiz mumkin.")}'
-            f'</form></section>')
+            f'<form method=post action="/premium/{g["id"]}/test" class=stack>{test_box(value, note=note)}</form></section>')
 
 
 async def _preview(g) -> str:
@@ -311,7 +330,7 @@ async def _preview(g) -> str:
     btns = "".join(f'<span class=tg-btn>{channels.emoji(k)} {e(t)}</span>' for _, k, t, *_ in await channels.active())
     invite = (f'<div class=preview><div class=bubble>{premium.INVITE_TEXT}</div>{btns}'
               f'<span class=tg-btn>✅ Tasdiqlash</span></div>')
-    return (f'<section class=card><div class=card-h><h2>Telegramda ko\'rinishi</h2></div>'
+    return (f'<section class="card gw-pv"><div class=card-h><h2>Telegramda ko\'rinishi</h2></div>'
             f'<div class="muted small" style="margin-bottom:6px">Post</div>{post}'
             f'<div class="muted small" style="margin:14px 0 6px">«Boshlash» bosilgach</div>{invite}</section>')
 
@@ -410,16 +429,17 @@ async def _participants(request: web.Request, g, stats) -> str:
             f'{toolbar}{content}</section>')
 
 
-async def _history(current_id: int) -> str:
-    rows = await db.gw_list()
+def _history(current_id: int, rows) -> str:
     if len(rows) < 2:
         return ""
-    on, off = '<span class="pill on">Faol</span>', '<span class="pill off">Yopilgan</span>'
+    pills = {"draft": '<span class="pill warn">Qoralama</span>', "on": '<span class="pill on">Faol</span>',
+             "off": '<span class="pill off">Yopilgan</span>'}
     here = ' <span class="muted small">· ochiq</span>'
     trs = "".join(
         f'<tr><td><a class=row-link href="/premium/{r["id"]}">{e(r["title"])}</a>'
         f'{here if r["id"] == current_id else ""}'
-        f'<div class="muted small">#{r["id"]}</div></td><td>{on if r["is_active"] else off}</td>'
+        f'<div class="muted small">#{r["id"]}</div></td>'
+        f'<td>{pills["draft" if r["is_draft"] else "on" if r["is_active"] else "off"]}</td>'
         f'<td class=nowrap>{dt(r["created_at"])}<div class="muted small">→ {dt(r["ends_at"])}</div></td>'
         f'<td class=num>{num(r["joined"])}</td></tr>'
         for r in rows
@@ -433,21 +453,40 @@ async def _history(current_id: int) -> str:
 async def _view(request: web.Request, g) -> str:
     bot = request.app["bot"]
     me = await bot.me()
-    gid, active, ended = g["id"], g["is_active"], premium.is_ended(g)
-    stats = await db.gw_stats(gid, panel._today_start())
+    gid, active, draft, ended = g["id"], g["is_active"], g["is_draft"], premium.is_ended(g)
+    editable = active or draft
+    rows = await db.gw_list()
+    current_active = next((r for r in rows if r["is_active"]), None)
+    other_active = bool(current_active and current_active["id"] != gid)
 
-    if active and not ended:
+    if draft:
+        status = '<span class="pill warn">Qoralama</span>'
+    elif active and not ended:
         status = '<span class="pill on">Faol</span>'
     elif ended:
         status = '<span class="pill off">Muddat tugagan</span>'
     else:
         status = '<span class="pill off">Yopilgan</span>'
     left = None if ended else panel.time_left(g["ends_at"])
-    n_posts = len(await premium.posts(g))
-    meta = [f"Boshlangan <b>{dt(g['created_at'])}</b>",
-            f"Tugash <b>{dt(g['ends_at'])}</b>" + (f" · {left} qoldi" if left else ""),
-            "Joylangan: " + (f"<b>{n_posts} joyda</b>" if n_posts else "<b>hali joylanmagan</b>")]
+    ends = f"Tugash <b>{dt(g['ends_at'])}</b>" + (f" · {left} qoldi" if left else "")
+    if draft:
+        meta = ["Qoralama — faollashtirilmaguncha botda ko'rinmaydi", ends]
+    else:
+        n_posts = len(await premium.posts(g))
+        meta = [f"Boshlangan <b>{dt(g['created_at'])}</b>", ends,
+                "Joylangan: " + (f"<b>{n_posts} joyda</b>" if n_posts else "<b>hali joylanmagan</b>")]
+
     actions = []
+    if editable:
+        actions.append('<a class="btn outline" href="#publish">📢 Kimga joylash</a>')
+        actions.append('<a class="btn outline" href="#test">🧪 Sinov</a>')
+    if draft:
+        confirm = e("Konkurs faollashtirilsinmi? Botda ishtirok etish ochiladi"
+                    + (", hozirgi faol konkurs yopiladi." if other_active else "."))
+        actions.append(f'<form method=post action="/premium/{gid}/activate" data-confirm="{confirm}">'
+                       f'<button class="btn primary">✅ Faollashtirish</button></form>')
+        actions.append(f'<form method=post action="/premium/{gid}/delete" data-confirm="{e("Qoralama o‘chirilsinmi?")}">'
+                       f'<button class="btn danger">{icon("trash")}O\'chirish</button></form>')
     if active:
         actions.append(f'<a class="btn outline" href="{e(premium.deep_link(me.username))}" target=_blank '
                        f'rel=noopener data-tip="Konkursni botda o\'zingiz sinab ko\'ring">{icon("send")}Botda ochish</a>')
@@ -455,51 +494,69 @@ async def _view(request: web.Request, g) -> str:
         confirm = e("Konkurs muddati hozir tugatilsinmi? Yangi ishtirokchilar qabul qilinmaydi.")
         actions.append(f'<form method=post action="/premium/{gid}/end" data-confirm="{confirm}">'
                        f'<button class="btn danger">{icon("stop")}Hozir yakunlash</button></form>')
-    actions.append(f'<a class="btn outline" href="/premium/{gid}/export.csv">{icon("download")}CSV</a>')
+    if not draft:
+        actions.append(f'<a class="btn outline" href="/premium/{gid}/export.csv">{icon("download")}CSV</a>')
     back = "" if active else f'<a class=back href="/premium">{icon("back")}Premium</a>'
     head = (f'{back}<div class=ph><div><div class=ph-title><h1>{e(g["title"])}</h1>{status}</div>'
             f'<div class=ph-meta>{"".join(f"<span>{m}</span>" for m in meta)}</div></div>'
             f'<div class=actions>{"".join(actions)}</div></div>')
 
-    joined_all = stats["joined"] + stats["left_n"]
-    tiles = ('<div class=tiles>'
-             + panel._tile("Boshlaganlar", num(stats["started"]), "«Boshlash»ni bosganlar")
-             + panel._tile("Ishtirokchilar", num(stats["joined"]), f"chiqib ketgan: {num(stats['left_n'])}")
-             + panel._tile("Bugun qo'shilgan", num(stats["today"]), "soat 00:00 dan beri")
-             + panel._tile("Telefon ulashganlar", num(stats["phones"]),
-                           f"{stats['phones'] / joined_all * 100:.0f}% ishtirokchilardan" if joined_all else "ixtiyoriy")
-             + '</div>')
+    # boshqa qoralamalar haqida eslatma
+    drafts = [r for r in rows if r["is_draft"] and r["id"] != gid]
+    notice = ""
+    if drafts:
+        links = ", ".join(f'<a href="/premium/{r["id"]}">«{e(r["title"])}»</a>' for r in drafts[:5])
+        notice = f'<div class="alert warn" style="margin-bottom:16px">📝 Qoralama: {links}</div>'
 
-    winners = await _winners_card(g, stats) if ended else ""
-    if active:
-        post_card = (f'<section class=card><div class=card-h><h2>Post</h2>'
-                     f'<span class="muted small">saqlansa kanal va botdagi nusxalar ham yangilanadi</span></div>'
+    tiles = winners = participants = ""
+    if not draft:
+        stats = await db.gw_stats(gid, panel._today_start())
+        joined_all = stats["joined"] + stats["left_n"]
+        tiles = ('<div class=tiles>'
+                 + panel._tile("Boshlaganlar", num(stats["started"]), "«Boshlash»ni bosganlar")
+                 + panel._tile("Ishtirokchilar", num(stats["joined"]), f"chiqib ketgan: {num(stats['left_n'])}")
+                 + panel._tile("Bugun qo'shilgan", num(stats["today"]), "soat 00:00 dan beri")
+                 + panel._tile("Telefon ulashganlar", num(stats["phones"]),
+                               f"{stats['phones'] / joined_all * 100:.0f}% ishtirokchilardan" if joined_all
+                               else "ixtiyoriy")
+                 + '</div>')
+        winners = await _winners_card(g, stats) if ended else ""
+        participants = await _participants(request, g, stats)
+
+    if editable:
+        hint = "saqlansa kanal va botdagi nusxalar ham yangilanadi" if active else "avval saqlang, keyin sinab ko'ring"
+        post_card = (f'<section class="card g-post"><div class=card-h><h2>📝 Post</h2>'
+                     f'<span class="muted small">{hint}</span></div>'
                      f'<form method=post action="/premium/{gid}/save" enctype=multipart/form-data class=gw-form>'
                      f'{_fields(g)}<div class=full><button class="btn primary">Saqlash</button></div></form></section>')
         test_chat = await db.get_setting(f"ads_test:{request['admin'][0]}") or ""
-        main = (f'<div class="split section"><div class=stack>{post_card}{await _publish_card(bot, g)}'
-                f'{_test_card(gid, test_chat)}</div><div class=stack>{await _preview(g)}</div></div>')
+        main = (f'<div class="gw-grid section">{post_card}{await _publish_card(bot, g, other_active)}'
+                f'{_test_card(g, test_chat)}<div class=g-pv>{await _preview(g)}</div></div>')
     else:
         main = f'<div class=section>{await _preview(g)}</div>'
 
-    new = (f'<details class="card section" id=new><summary>{icon("plus")}Yangi konkurs{icon("chev", "chev")}'
-           f'</summary>{_new_form(bool(await db.gw_active()))}</details>')
-    return (STYLE + '<div class=gw>' + head + tiles + winners + main
-            + await _participants(request, g, stats) + await _history(gid) + new + '</div>'
+    return (STYLE + '<div class=gw>' + head + notice + tiles + winners + main + participants
+            + _history(gid, rows) + _new_card(bool(current_active)) + '</div>'
             + PROGRESS_JS + PREVIEW_JS + AUDIENCE_JS)
 
 
 # --- sahifalar ---
 async def premium_page(request: web.Request):
     gid = request.match_info.get("id")
-    g = await db.gw_get(int(gid)) if gid else await db.gw_last()
+    g = await db.gw_get(int(gid)) if gid else await db.gw_current()
     if gid and not g:
         raise web.HTTPNotFound()
     if not g:
         body = (STYLE + '<div class=gw><div class=ph><div><h1>Premium</h1><div class=ph-meta>Telegram Premium '
-                'konkursi: foydalanuvchi obuna bo\'lib, ishtirok raqamini oladi. Birinchi konkursni yarating.'
-                '</div></div></div><section class=card id=new><div class=card-h><h2>Yangi konkurs</h2></div>'
-                f'{_new_form(False)}</section></div>')
+                'konkursi: foydalanuvchi obuna bo\'lib, ishtirok raqamini oladi.</div></div></div>'
+                '<section class=card style="max-width:720px"><div class=card-h><h2>Qanday ishlaydi</h2></div>'
+                '<div class=stack><ol class=steps>'
+                '<li><b>Post</b> — matn, rasm, tugma va tugash vaqti.</li>'
+                '<li><b>Kimga joylash</b> — bot foydalanuvchilari (auditoriya bilan) va kanal/guruhlar.</li>'
+                '<li><b>Sinov</b> — avval o\'zingizning akkauntingizga yuborib ko\'ring.</li>'
+                '<li><b>Joylash</b> — konkurs faollashadi va post tanlangan joylarga tarqaladi.</li></ol>'
+                f'<form method=post action=/premium/new><button class="btn primary">{icon("plus")}'
+                'Yangi konkurs yaratish</button></form></div></section></div>')
         return panel.page(body, title="Premium", active="gift")
     return panel.page(await _view(request, g), title="Premium", active="gift")
 
@@ -524,30 +581,21 @@ async def _jpeg(raw: bytes, back: str) -> bytes:
 
 
 async def _editable(request: web.Request):
-    """(id, konkurs, qaytish manzili); konkurs yopilgan bo'lsa — xabar bilan qaytariladi."""
+    """(id, konkurs, qaytish manzili); faol konkurs yoki qoralama bo'lmasa — xabar bilan qaytariladi."""
     gid = int(request.match_info["id"])
     back = f"/premium/{gid}"
     g = await db.gw_get(gid)
     if not g:
         raise web.HTTPNotFound()
-    if not g["is_active"]:
+    if not (g["is_active"] or g["is_draft"]):
         _to(back, "pr_closed")
     return gid, g, back
 
 
 async def gw_new(request: web.Request):
-    title, desc, button, ends, raw, _ = await _read_form(request)
-    if not title:
-        _to("/premium", "notitle")
-    if not ends or ends <= datetime.now(timezone.utc):
-        _to("/premium", "badtime")
-    if raw and len(desc) > 1024:
-        _to("/premium", "toolong")
-    jpeg = await _jpeg(raw, "/premium") if raw else None
-    gid = await db.gw_create(title, desc, button, ends)
-    if jpeg:
-        await db.gw_set_image(gid, jpeg)
-    _to(f"/premium/{gid}", "pr_created")
+    gid = await db.gw_create_draft("Yangi konkurs", "", premium.DEFAULT_BUTTON,
+                                   datetime.now(timezone.utc) + timedelta(days=7))
+    _to(f"/premium/{gid}", "pr_draft")
 
 
 async def gw_save(request: web.Request):
@@ -582,6 +630,10 @@ async def gw_publish(request: web.Request):
         users = await db.gw_audience_unsent(gid, kind, days, ids)
         if not users and not dest:
             _to(back, "pr_nousers")
+    if g["is_draft"]:
+        if premium.is_ended(g):
+            _to(back, "badtime")
+        await db.gw_activate(gid)
     if dest:
         titles = {i["chat_id"]: i["title"] for i in items}
         _last_result[gid] = [(titles.get(c, c), err) for c, err in await premium.publish_to(bot, gid, dest)]
@@ -659,9 +711,31 @@ async def target_delete(request: web.Request):
 
 async def gw_end(request: web.Request):
     gid, g, back = await _editable(request)
+    if not g["is_active"]:
+        _to(back, "pr_closed")
     if not premium.is_ended(g):
         await db.gw_set_ends(gid, datetime.now(timezone.utc))
     _to(back, "pr_ended")
+
+
+async def gw_activate(request: web.Request):
+    gid, g, back = await _editable(request)
+    if g["is_draft"]:
+        if premium.is_ended(g):
+            _to(back, "badtime")
+        await db.gw_activate(gid)
+    _to(back, "pr_activated")
+
+
+async def gw_delete(request: web.Request):
+    gid = int(request.match_info["id"])
+    g = await db.gw_get(gid)
+    if not g:
+        raise web.HTTPNotFound()
+    if not g["is_draft"]:
+        _to(f"/premium/{gid}", "pr_closed")
+    await db.gw_delete_draft(gid)
+    _to("/premium", "pr_deleted")
 
 
 async def gw_draw(request: web.Request):
@@ -728,6 +802,8 @@ def setup(app: web.Application):
         web.post(r"/premium/{id:\d+}/save", gw_save),
         web.post(r"/premium/{id:\d+}/publish", gw_publish),
         web.post(r"/premium/{id:\d+}/end", gw_end),
+        web.post(r"/premium/{id:\d+}/activate", gw_activate),
+        web.post(r"/premium/{id:\d+}/delete", gw_delete),
         web.post(r"/premium/{id:\d+}/draw", gw_draw),
         web.post(r"/premium/{id:\d+}/notify", gw_notify),
         web.get(r"/premium/{id:\d+}/export.csv", gw_export),

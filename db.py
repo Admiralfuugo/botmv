@@ -169,6 +169,8 @@ CREATE TABLE IF NOT EXISTS ad_clicks (
     clicks INT NOT NULL DEFAULT 0,
     PRIMARY KEY (ad_id, button)
 );
+-- Premium qoralamasi: faollashtirilguncha botda ko'rinmaydi (is_active=FALSE)
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS is_draft BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 
@@ -562,7 +564,7 @@ async def export_votes(poll_id):
 # --- premium (Telegram Premium konkursi) ---
 GW_FIRST_NUMBER = 70001
 _GW_COLS = ("id, title, description, button_text, image_ver, ends_at, is_active, message_id, created_at, "
-            "image IS NOT NULL AS has_image")
+            "image IS NOT NULL AS has_image, is_draft")
 
 
 async def gw_create(title, description, button_text, ends_at) -> int:
@@ -573,6 +575,33 @@ async def gw_create(title, description, button_text, ends_at) -> int:
             "INSERT INTO giveaways(title, description, button_text, ends_at) VALUES($1, $2, $3, $4) RETURNING id",
             title, description, button_text, ends_at,
         )
+
+
+async def gw_create_draft(title, description, button_text, ends_at) -> int:
+    """Yangi konkurs qoralamasi: faol konkursga tegmaydi, botda ko'rinmaydi."""
+    return await pool.fetchval(
+        "INSERT INTO giveaways(title, description, button_text, ends_at, is_active, is_draft) "
+        "VALUES($1, $2, $3, $4, FALSE, TRUE) RETURNING id",
+        title, description, button_text, ends_at,
+    )
+
+
+async def gw_activate(gid):
+    """Qoralamani faollashtiradi; avvalgi faol konkurs yopiladi."""
+    async with pool.acquire() as c, c.transaction():
+        await c.execute("UPDATE giveaways SET is_active=FALSE WHERE is_active AND id<>$1", gid)
+        await c.execute(
+            "UPDATE giveaways SET is_active=TRUE, is_draft=FALSE, created_at=now() WHERE id=$1 AND is_draft", gid
+        )
+
+
+async def gw_delete_draft(gid):
+    await pool.execute("DELETE FROM giveaways WHERE id=$1 AND is_draft", gid)
+
+
+async def gw_current():
+    """Faol konkurs, u bo'lmasa eng yangisi (qoralama ham)"""
+    return await pool.fetchrow(f"SELECT {_GW_COLS} FROM giveaways ORDER BY is_active DESC, id DESC LIMIT 1")
 
 
 async def gw_get(gid):
@@ -590,7 +619,7 @@ async def gw_last():
 async def gw_list():
     """Barcha konkurslar yangidan eskiga, ishtirokchilar soni bilan"""
     return await pool.fetch(
-        "SELECT g.id, g.title, g.is_active, g.created_at, g.ends_at, "
+        "SELECT g.id, g.title, g.is_active, g.is_draft, g.created_at, g.ends_at, "
         "(SELECT COUNT(*) FROM giveaway_entries e WHERE e.giveaway_id=g.id AND e.number IS NOT NULL) AS joined "
         "FROM giveaways g ORDER BY g.id DESC"
     )

@@ -422,7 +422,9 @@ function togglePw(){var p=document.getElementById('pw');p.type=p.type==='passwor
     ad_deleting:"Xabarlar chatlardan o'chirilmoqda",ad_copied:"Nusxa olindi — yangi qoralama",
     ad_removed:"Reklama o'chirildi",ad_unscheduled:"Rejalashtirish bekor qilindi",
     pr_testsent:"Sinov posti yuborildi",pr_testfail:"Sinov postini yuborib bo'lmadi",
-    pr_nousers:"Tanlangan auditoriyada postni hali olmagan odam yo'q"};
+    pr_nousers:"Tanlangan auditoriyada postni hali olmagan odam yo'q",
+    pr_draft:"Qoralama ochildi — postni yozing, kimga joylashni tanlang va sinab ko'ring",
+    pr_activated:"Konkurs faollashtirildi",pr_deleted:"Qoralama o'chirildi"};
   var ERR={badtg:1,badurl:1,needlink:1,notitle:1,exists:1,baduser:1,shortpw:1,mismatch:1,badpw:1,lastsuper:1,self:1,forbidden:1,
     pr_nowhere:1,pr_running:1,pr_notended:1,pr_nobody:1,pr_tgerr:1,pr_blocked:1,pr_senderr:1,pr_notext:1,pr_closed:1,
     tg_bad:1,tg_missing:1,tg_noadmin:1,ad_locked:1,ad_badbtn:1,ad_toolong:1,ad_empty:1,ad_noone:1,ad_testbad:1,ad_testfail:1,pr_testfail:1,pr_nousers:1};
